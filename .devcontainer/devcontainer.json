@@ -73,11 +73,12 @@
   // above are the ones that are valid right now rather than whatever Claude
   // last happened to flush to disk. See .devcontainer/export-creds.sh.
   //
-  // herdr-host-relay.sh publishes the host's herdr API socket on the loopback
-  // for the container to reach (see .devcontainer/herdr-tcp-bridge.py). Kept
-  // non-fatal in its own group: herdr not running is normal, and it must not
-  // stop the container from coming up — unlike a credentials export failure.
-  "initializeCommand": ".devcontainer/export-creds.sh && { .devcontainer/herdr-host-relay.sh start || true; }",
+  // `bridge start` publishes the host's herdr API socket on the loopback for the
+  // container to reach (see src/forward.rs). It needs the plugin binary, so
+  // build.sh runs first — a no-op once built. Kept non-fatal in its own group:
+  // herdr not running is normal, and it must not stop the container from coming
+  // up — unlike a credentials export failure.
+  "initializeCommand": ".devcontainer/export-creds.sh && { ./build.sh >/dev/null && ./bin/herdr-devcontainer-status bridge start || true; }",
 
   "postCreateCommand": ".devcontainer/post-create.sh",
 
@@ -87,10 +88,12 @@
   // credentials file forever. seed-claude.sh only overwrites what it can tell
   // is empty, so local edits still survive.
   //
-  // herdr-relay.sh is the container end of the agent-state bridge. Started here
-  // so it's up for any session, and again by herdr-exec.sh (idempotent) in case
-  // socat died. Both non-fatal: neither is worth blocking a container start.
-  "postStartCommand": ".devcontainer/seed-claude.sh || true; .devcontainer/herdr-relay.sh || true",
+  // No relay start here any more: the container end of the agent-state bridge is
+  // only useful to a session that also has HERDR_PANE_ID, and only the host's
+  // `exec` subcommand can supply that — it starts the relay itself, idempotently,
+  // before each session. Starting one here would mean a cargo build on every
+  // container start for a forwarder nothing would talk to.
+  "postStartCommand": ".devcontainer/seed-claude.sh || true",
 
   "customizations": {
     "vscode": {

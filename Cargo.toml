@@ -8,6 +8,10 @@ license = "MIT"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# setsid (detach a forwarder from the pane's session) and kill(pid, 0) (is it
+# still there?). The alternative is shelling out to nohup/kill, which is what the
+# shell version this replaced had to do.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

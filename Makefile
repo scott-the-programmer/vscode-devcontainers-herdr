@@ -23,7 +23,12 @@ help: ## Show this help
 
 ## --- host build / unit tests ---------------------------------------------
 
-build: ## Build the host binary into ./bin (via build.sh)
+build: $(BIN) ## Build the host binary into ./bin (via build.sh)
+
+# A file target, not .PHONY: `claude`, `shell` and `relay` all run through this
+# binary now, and rebuilding it on every one of them would add a cargo run to
+# each session start.
+$(BIN): Cargo.toml Cargo.lock build.sh $(wildcard src/*.rs)
 	./build.sh
 
 test: ## Run cargo tests
@@ -63,20 +68,21 @@ claude-seed: ## Re-copy host Claude config into the container (overwrites)
 creds-seed: ## Re-copy host git/SSH/gh credentials into the container (overwrites)
 	devcontainer exec --workspace-folder . .devcontainer/seed-creds.sh --force
 
-claude: ## Run Claude in the container, reporting agent state to this herdr pane
-	@.devcontainer/herdr-exec.sh claude
+claude: $(BIN) ## Run Claude in the container, reporting agent state to this herdr pane
+	@$(BIN) exec claude
 
-shell: ## Shell into the running container (herdr pane env forwarded)
-	# herdr-exec.sh, not a bare `devcontainer exec bash`: with the pane env
-	# forwarded, a `claude` typed inside this shell shows up in herdr too.
-	@.devcontainer/herdr-exec.sh bash
+shell: $(BIN) ## Shell into the running container (herdr pane env forwarded)
+	# `exec bash`, not a bare `devcontainer exec bash`: with the pane env
+	# forwarded, a `claude` typed inside this shell reports its session too
+	# (though it won't be *detected* — see the README on argv0).
+	@$(BIN) exec bash
 
-relay: ## Start/inspect the host-side herdr socket bridge
-	@.devcontainer/herdr-host-relay.sh start
-	@devcontainer exec --workspace-folder . .devcontainer/herdr-relay.sh
+relay: $(BIN) ## Start/inspect both ends of the herdr agent-state bridge
+	@$(BIN) bridge start
+	@$(BIN) relay start --container
 
-relay-stop: ## Stop the host-side herdr socket bridge
-	@.devcontainer/herdr-host-relay.sh stop
+relay-stop: $(BIN) ## Stop the host-side herdr socket bridge
+	@$(BIN) bridge stop
 
 reshell: ## Rebuild the container, then shell into it
 	@$(MAKE) --no-print-directory rebuild
@@ -95,13 +101,12 @@ ps: ## Raw docker view of this repo's devcontainer
 	@docker ps -a --filter label=devcontainer.local_folder \
 	  --format '{{.State}}\t{{.Label "devcontainer.local_folder"}}\t{{.Names}}'
 
-status: ## Run the plugin against this repo (build first if needed)
-	@test -x $(BIN) || $(MAKE) --no-print-directory build
+status: $(BIN) ## Run the plugin against this repo (build first if needed)
 	@HERDR_PANE_CWD=$(ROOT) $(BIN) refresh | jq .
 
 ## --- the full transition check --------------------------------------------
 
-e2e: build ## running -> stopped -> none, as the plugin reports it
+e2e: $(BIN) ## running -> stopped -> none, as the plugin reports it
 	@$(MAKE) --no-print-directory up
 	@echo '--- expect status=running'
 	@$(MAKE) --no-print-directory status

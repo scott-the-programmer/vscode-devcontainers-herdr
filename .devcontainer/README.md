@@ -39,6 +39,12 @@ fine, but *running* the plugin from inside it will not match paths:
 in-container run can translate. For real end-to-end verification, build via
 `./build.sh` on the host and let herdr invoke the binary there.
 
+`build.sh` installs by writing `bin/.herdr-devcontainer-status.new` and renaming
+it into place. That's not tidiness: overwriting a macOS binary that has already
+been run leaves the kernel's cached code signature mismatched, and every later
+exec then dies with `SIGKILL` before `main` — no output, exit 137. Easy to miss
+before `make claude`/`shell`/`relay` started running this binary every session.
+
 ## Claude Code in the container
 
 Claude Code is **baked into the image** by `.devcontainer/Dockerfile`, not
@@ -153,41 +159,71 @@ Then the pane shows up in `herdr agent list` as a claude agent with live
 idle/working/done status, same as a host-side session.
 
 A bare `devcontainer exec … claude` shows up as nothing at all, for two
-independent reasons — both of which `.devcontainer/herdr-exec.sh` handles.
+independent reasons. The plugin binary handles both, as subcommands beside the
+status one it exists for:
+
+| subcommand | runs on | what it does |
+| --- | --- | --- |
+| `exec <cmd>` | host | forwards the pane's herdr identity into the container, spoofs `argv0`, runs `<cmd>` (`make claude`, `make shell`) |
+| `bridge start\|stop\|status\|serve` | host | serves `~/.config/herdr/herdr.sock` on `127.0.0.1:47100` (`initializeCommand`, `make relay`) |
+| `relay start\|stop\|status\|serve` | container | presents that port as `~/.herdr/herdr.sock` |
+| `relay … --container` | host | drives the container's relay through the CLI |
 
 **1. The pane's identity doesn't cross the boundary.** herdr's Claude
 integration (`~/.claude/hooks/herdr-agent-state.sh`, seeded into the container
 with the rest of `hooks/`) reports the session over a socket, but it exits `0`
 unless `HERDR_ENV`, `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` are all set. herdr
 sets those in the *pane's* shell on the host; nothing carries them across
-`devcontainer exec`. `herdr-exec.sh` passes them per-exec with `--remote-env`,
-which is also why they can't go in `devcontainer.json`: `containerEnv` is fixed
-at create time and the pane id differs per pane.
+`devcontainer exec`. `exec` passes them per-exec with `--remote-env`, which is
+also why they can't go in `devcontainer.json`: `containerEnv` is fixed at create
+time and the pane id differs per pane.
 
-And the socket they name has to exist *in the container*, which needs a relay:
+And the socket they name has to exist *in the container*, which is what the
+bridge and the relay are for — two mirror-image hops (`src/forward.rs`):
 
-| where | what | why |
-| --- | --- | --- |
-| host | `herdr-tcp-bridge.py` | serves `~/.config/herdr/herdr.sock` on `127.0.0.1:47100` |
-| host | `herdr-host-relay.sh` | starts/stops/inspects that bridge (`initializeCommand`, `make relay`) |
-| container | `herdr-relay.sh` | `socat` from `~/.herdr/herdr.sock` to `host.docker.internal:47100` |
+```text
+container:  ~/.herdr/herdr.sock  ->  host.docker.internal:47100   (relay)
+host:       127.0.0.1:47100      ->  ~/.config/herdr/herdr.sock   (bridge)
+```
 
-The relay exists because **Docker Desktop can't bind-mount a unix socket**:
-file sharing doesn't carry sockets across the VM boundary, so mounting
-`herdr.sock` gets you a path that exists and never connects.
-(`/var/run/docker.sock` works only because Docker Desktop special-cases it.) The
-bridge binds loopback only — Docker Desktop forwards `host.docker.internal` to
-the host's `127.0.0.1`, so the herdr control socket never reaches the LAN.
+They exist because **Docker Desktop can't bind-mount a unix socket**: file
+sharing doesn't carry sockets across the VM boundary, so mounting `herdr.sock`
+gets you a path that exists and never connects. (`/var/run/docker.sock` works
+only because Docker Desktop special-cases it.) The bridge binds loopback only —
+Docker Desktop forwards `host.docker.internal` to the host's `127.0.0.1`, so the
+herdr control socket never reaches the LAN.
+
+Both ends are the same binary, which means the container needs a **linux build of
+it**. `exec` gets one by running `cargo build --release` in the container before
+each session — unconditionally, because after any change to this crate what's in
+`target/release` is last session's binary. It's a no-op in the steady state, the
+first one takes a minute, and `target/` is a named volume so it never touches the
+host-arch binary `build.sh` produces. Not cross-compiled from the host: that
+needs a linux linker the host doesn't have, and the image that would carry a
+pre-built artifact is the thing that compiles it.
 
 **2. herdr identifies a pane's agent by `argv0`, not by the reported session.**
 It scans the pane's foreground process group for a known name; all the host can
 see here is `Code Helper (Plugin)` running the devcontainer CLI. Without a match
 the pane stays `agent=none status=unknown` and the output rules that produce
 idle/working never run — the reported session id alone doesn't change that.
-So `herdr-exec.sh` re-execs itself via `exec -a claude` and stays alive as the
-parent of the container command, putting one host-side process named `claude` in
-the group. Status then comes from herdr scanning the pane's output, which is the
-container TUI, so it tracks normally.
+So `exec` re-execs itself with `argv0` rewritten to `claude`
+(`CommandExt::arg0`) and stays alive as the parent of the container command,
+putting one host-side process named `claude` in the group:
+
+```text
+zsh -lc make claude
+└─ make claude
+   └─ claude exec claude          <- us, re-exec'd; this is what herdr matches
+      └─ sh …/devcontainer exec --remote-env … claude
+         └─ Code Helper (Plugin) … cli.js exec …
+```
+
+It has to be a re-exec rather than a spoofed child: the name must sit on a
+process that outlives the call, and the `devcontainer` CLI is a `/bin/sh` script
+that execs node, so a spoof applied to *it* would be lost. Status then comes from
+herdr scanning the pane's output, which is the container TUI, so it tracks
+normally.
 
 Consequences worth knowing:
 
@@ -201,8 +237,13 @@ Consequences worth knowing:
   means pointing `CLAUDE_CONFIG_DIR` at a directory bind-mounted at the *same
   absolute path* on both sides, which trades away the "container writes never
   reach the host" property above.
-- **`make relay` / `make relay-stop`** inspect and stop the host bridge. One
-  bridge serves every pane; no pane owns its lifetime.
+- **`make relay` / `make relay-stop`** start/inspect both ends, and stop the host
+  bridge. One bridge serves every pane; no pane owns its lifetime, and `start` is
+  a no-op whenever something already answers on the endpoint.
+- **`postStartCommand` doesn't start the relay.** It used to. A relay is only
+  useful to a session that also has `HERDR_PANE_ID`, and only `exec` can supply
+  that — so `exec` starts it, idempotently, before each session. Starting one at
+  container start would mean a cargo build for a forwarder nothing would talk to.
 - **Not herdr's problem, but visible in the same place:** plugin hooks that
   shell out to `node` fail in here (`/bin/sh: 1: node: not found`) because this
   is a Node-less image. Non-blocking, but it prints on every prompt.

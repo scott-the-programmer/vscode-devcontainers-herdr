@@ -42,5 +42,12 @@ echo "building with $CARGO"
 "$CARGO" build --release --locked
 
 mkdir -p bin
-cp target/release/herdr-devcontainer-status bin/
+# Install by rename, never by writing through the existing path: macOS caches a
+# code signature per file, and overwriting a binary that has already been run
+# leaves the cache mismatched — every later exec then dies with SIGKILL
+# ("Killed: 9") before main, with no output to explain it. The rename hands the
+# kernel a new file to validate. Only visible since `make claude`/`shell`/`relay`
+# run this binary on every session.
+cp target/release/herdr-devcontainer-status bin/.herdr-devcontainer-status.new
+mv -f bin/.herdr-devcontainer-status.new bin/herdr-devcontainer-status
 echo "installed bin/herdr-devcontainer-status"

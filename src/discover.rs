@@ -89,7 +89,10 @@ mod tests {
         touch(&root.join(".devcontainer.json"));
 
         let d = find(&root).unwrap();
-        assert_eq!(d.configs, vec![root.canonicalize().unwrap().join(".devcontainer.json")]);
+        assert_eq!(
+            d.configs,
+            vec![root.canonicalize().unwrap().join(".devcontainer.json")]
+        );
     }
 
     #[test]
@@ -110,6 +113,9 @@ mod tests {
         touch(&root.join(".devcontainer/devcontainer.json"));
         let pkg = root.join("packages/svc");
         touch(&pkg.join(".devcontainer/devcontainer.json"));
+        // A real pane's cwd exists; without that, canonicalize() fails and the
+        // walk reports the uncanonicalised path (on macOS /var vs /private/var).
+        fs::create_dir_all(pkg.join("src")).unwrap();
 
         let d = find(&pkg.join("src")).unwrap();
         assert_eq!(d.project_root, pkg.canonicalize().unwrap());
