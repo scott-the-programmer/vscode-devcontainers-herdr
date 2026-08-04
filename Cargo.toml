@@ -1,0 +1,17 @@
+[package]
+name = "herdr-devcontainer-status"
+version = "0.1.0"
+edition = "2021"
+description = "herdr plugin: shows the VS Code devcontainer state of each pane's project"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true

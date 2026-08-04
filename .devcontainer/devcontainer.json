@@ -1,0 +1,117 @@
+{
+  "name": "herdr-devcontainer-status",
+
+  // Not a bare "image": the Dockerfile is the stock rust image plus Claude Code
+  // baked in, so a rebuild doesn't re-download it. Pin a release by passing
+  // CLAUDE_VERSION (e.g. "2.1.220") instead of tracking latest.
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "CLAUDE_VERSION": "latest"
+    }
+  },
+
+  // The plugin's whole job is reading `docker ps` devcontainer labels, so it
+  // needs the *host* daemon, not a nested one. docker-outside-of-docker
+  // bind-mounts the host socket. Consequence: labels seen from in here carry
+  // host paths, not /workspaces paths — see .devcontainer/README.md.
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "moby": false
+    },
+    // The host's gh token is seeded below; without the CLI itself that config
+    // would just be a file nothing reads.
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+
+  // target/ and the cargo registry on named volumes: cargo does a lot of small
+  // writes and macOS bind mounts are slow. Keeping target/ off the bind mount
+  // also stops container artifacts from clobbering the host-arch binary that
+  // build.sh puts in target/release/ for `herdr plugin link`.
+  // Claude config: the host copies come in read-only at /host-claude*, and
+  // post-create.sh seeds a container-owned volume from them. The container
+  // never writes through to the host, so in-container sessions don't pollute
+  // host history/projects/todos. Read-only also sidesteps the atomic-rename
+  // (EBUSY) failure a single-file bind mount hits when Claude rewrites
+  // ~/.claude.json — we copy it once instead of writing through the mount.
+  // Git/SSH/gh credentials follow the same read-only + copy pattern
+  // (.devcontainer/seed-creds.sh): ssh won't use a private key owned by the
+  // host uid, and `gh auth`/`git config --global` rewrite their files in
+  // place, which through a bind mount would edit the host's.
+  "mounts": [
+    "source=herdr-devcontainer-status-target,target=${containerWorkspaceFolder}/target,type=volume",
+    "source=herdr-devcontainer-status-cargo,target=/usr/local/cargo/registry,type=volume",
+    "source=herdr-devcontainer-status-claude,target=/home/vscode/.claude,type=volume",
+    "source=${localEnv:HOME}/.claude,target=/host-claude,type=bind,readonly",
+    "source=${localEnv:HOME}/.claude.json,target=/host-claude.json,type=bind,readonly",
+    // Written by initializeCommand below, and preferred over the copy inside
+    // /host-claude — on macOS that one is a stale side-copy of a Keychain the
+    // container can't read.
+    "source=${localEnv:HOME}/.claude/.container-credentials.json,target=/host-claude-credentials.json,type=bind,readonly",
+    "source=${localEnv:HOME}/.ssh,target=/host-ssh,type=bind,readonly",
+    "source=${localEnv:HOME}/.gitconfig,target=/host-gitconfig,type=bind,readonly",
+    "source=${localEnv:HOME}/.config/git,target=/host-git,type=bind,readonly",
+    "source=${localEnv:HOME}/.config/gh,target=/host-gh,type=bind,readonly"
+  ],
+
+  "containerEnv": {
+    // Dogfood aid: in here the repo is /workspaces/..., but the
+    // devcontainer.local_folder label reports the host path. Keep both so a
+    // manual run can map between them.
+    "HERDR_HOST_WORKSPACE": "${localWorkspaceFolder}",
+    // seed-creds.sh rewrites absolute host paths in the copied .gitconfig
+    // (signingkey, allowedSignersFile) to the container's $HOME.
+    "HERDR_HOST_HOME": "${localEnv:HOME}",
+    "CARGO_TERM_COLOR": "always"
+  },
+
+  // ~/.local/bin is on PATH via ENV in the Dockerfile, so there's no remoteEnv
+  // override here — one source of truth, and it applies to plain `docker run`
+  // on the image as well as to devcontainer sessions.
+
+  // Runs on the host before the container starts, so the credentials mounted
+  // above are the ones that are valid right now rather than whatever Claude
+  // last happened to flush to disk. See .devcontainer/export-creds.sh.
+  //
+  // herdr-host-relay.sh publishes the host's herdr API socket on the loopback
+  // for the container to reach (see .devcontainer/herdr-tcp-bridge.py). Kept
+  // non-fatal in its own group: herdr not running is normal, and it must not
+  // stop the container from coming up — unlike a credentials export failure.
+  "initializeCommand": ".devcontainer/export-creds.sh && { .devcontainer/herdr-host-relay.sh start || true; }",
+
+  "postCreateCommand": ".devcontainer/post-create.sh",
+
+  // Re-seed on every start, not just on create. The Claude config lives on a
+  // named volume that outlives any single container, so a session that ended
+  // logged out (rotated refresh token) would otherwise keep the blanked
+  // credentials file forever. seed-claude.sh only overwrites what it can tell
+  // is empty, so local edits still survive.
+  //
+  // herdr-relay.sh is the container end of the agent-state bridge. Started here
+  // so it's up for any session, and again by herdr-exec.sh (idempotent) in case
+  // socat died. Both non-fatal: neither is worth blocking a container start.
+  "postStartCommand": ".devcontainer/seed-claude.sh || true; .devcontainer/herdr-relay.sh || true",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "editor.formatOnSave": true,
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer"
+        },
+        "files.watcherExclude": {
+          "**/target/**": true
+        }
+      }
+    }
+  },
+
+  "remoteUser": "vscode"
+}
