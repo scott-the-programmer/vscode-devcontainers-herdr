@@ -84,8 +84,12 @@ relay: $(BIN) ## Start/inspect both ends of the herdr agent-state bridge
 relay-stop: $(BIN) ## Stop the host-side herdr socket bridge
 	@$(BIN) bridge stop
 
-reshell: ## Rebuild the container, then shell into it
+reshell: ## Rebuild the container, set up the relay, then shell into it
 	@$(MAKE) --no-print-directory rebuild
+	# A rebuild takes the container-side relay with it, and `shell` only starts
+	# one when it has a pane to report for — so bring both ends up here, where
+	# the container is new and the first in-container build gets paid once.
+	@$(MAKE) --no-print-directory relay
 	@$(MAKE) --no-print-directory shell
 
 logs: ## Tail container logs
