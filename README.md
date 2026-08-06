@@ -5,8 +5,7 @@ makes an agent session running *inside* one show up as a normal herdr agent.
 
 ## The problem
 
-herdr shows panes, Docker knows about containers, and nothing connects the two — so a pane
-can't tell you whether its project's devcontainer is up.
+herdr shows panes, Docker knows about containers, and nothing currently connects the two. This relay bridges the gap
 
 Coding harnesses such as Claude Code, OpenCode and Pi do not show up in herdr by default when
 they run inside one. This binary attempts to simplify the process by starting a session with a
