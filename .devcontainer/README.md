@@ -227,9 +227,12 @@ normally.
 
 Consequences worth knowing:
 
-- **`make shell` forwards the pane env but doesn't fake `argv0`** — a `claude`
-  typed inside that shell reports its session but won't be detected as an agent.
-  Use `make claude` for a session you want to see in herdr.
+- **`make shell` claims the pane too** (`exec --agent bash`), so a `claude`
+  typed inside that shell is detected, not just reported. It has to claim up
+  front: herdr only ever sees the *host* side of the pane, and a `claude` started
+  later inside the container changes nothing it can observe. The cost is a pane
+  that reads as `agent=claude` while it's only a shell — `exec bash` without the
+  flag is the honest version if that bothers you.
 - **The reported transcript path is a container path.** The hook sends
   `agent_session_path` as `/home/vscode/.claude/projects/…`, which the host
   can't read, so anything herdr derives from the transcript rather than from
@@ -244,9 +247,12 @@ Consequences worth knowing:
   useful to a session that also has `HERDR_PANE_ID`, and only `exec` can supply
   that — so `exec` starts it, idempotently, before each session. Starting one at
   container start would mean a cargo build for a forwarder nothing would talk to.
-- **Not herdr's problem, but visible in the same place:** plugin hooks that
-  shell out to `node` fail in here (`/bin/sh: 1: node: not found`) because this
-  is a Node-less image. Non-blocking, but it prints on every prompt.
+- **Not herdr's problem, but visible in the same place:** plugin hooks seeded
+  in from the host's `~/.claude` config sometimes shell out to `node`. The
+  Rust base image doesn't have one, so `devcontainer.json` adds the
+  `ghcr.io/devcontainers/features/node:1` feature for exactly this — it's
+  unrelated to Claude Code itself, which still uses the native, Node-free
+  installer above.
 
 ## Git, SSH and gh credentials
 

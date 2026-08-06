@@ -21,7 +21,12 @@
     },
     // The host's gh token is seeded below; without the CLI itself that config
     // would just be a file nothing reads.
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    // Claude Code itself doesn't need this (native installer, see Dockerfile) —
+    // this is only for plugin hooks seeded in from the host's ~/.claude that
+    // shell out to `node`. Those failed silently on every prompt without it
+    // (see .devcontainer/README.md).
+    "ghcr.io/devcontainers/features/node:1": {}
   },
 
   // target/ and the cargo registry on named volumes: cargo does a lot of small

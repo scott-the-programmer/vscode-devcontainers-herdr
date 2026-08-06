@@ -71,11 +71,11 @@ creds-seed: ## Re-copy host git/SSH/gh credentials into the container (overwrite
 claude: $(BIN) ## Run Claude in the container, reporting agent state to this herdr pane
 	@$(BIN) exec claude
 
-shell: $(BIN) ## Shell into the running container (herdr pane env forwarded)
-	# `exec bash`, not a bare `devcontainer exec bash`: with the pane env
-	# forwarded, a `claude` typed inside this shell reports its session too
-	# (though it won't be *detected* — see the README on argv0).
-	@$(BIN) exec bash
+shell: $(BIN) ## Shell into the running container (as a claude agent pane)
+	# --agent: herdr only sees the host side of a pane, so a `claude` started
+	# later inside this shell can't be detected unless the claim is already in
+	# place. Costs a pane that reads as agent=claude while it's only a shell.
+	@$(BIN) exec --agent bash
 
 relay: $(BIN) ## Start/inspect both ends of the herdr agent-state bridge
 	@$(BIN) bridge start

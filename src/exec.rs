@@ -35,6 +35,9 @@ use crate::supervise;
 /// Set on the re-exec so the spoofed process doesn't spoof itself again.
 const ARGV0_GUARD: &str = "HERDR_EXEC_ARGV0";
 
+/// The only agent this repo's container runs, and the argv0 herdr matches on.
+const DEFAULT_AGENT: &str = "claude";
+
 /// Runs in the container in one `devcontainer exec` round trip. The relay is this
 /// same binary built for linux, and `target/` is a named volume the host cannot
 /// see — so "is it built yet?" has to be asked in here, not on the host. Round
@@ -51,8 +54,9 @@ exec "$bin" relay "$1"
 "#;
 
 pub fn run(args: &[String]) -> i32 {
+    let (claim, args) = split_agent_flag(args);
     if args.is_empty() {
-        eprintln!("usage: herdr-devcontainer-status exec <command> [args...]");
+        eprintln!("usage: herdr-devcontainer-status exec [--agent] <command> [args...]");
         return 2;
     }
 
@@ -83,7 +87,7 @@ pub fn run(args: &[String]) -> i32 {
         return wait(devcontainer(&cli, &root, &[], args));
     };
 
-    spoof_argv0(args);
+    spoof_argv0(args, claim);
 
     // Non-fatal, both of them: a missing bridge or relay costs agent state in
     // herdr, not the session.
@@ -109,14 +113,13 @@ pub fn run(args: &[String]) -> i32 {
 /// command, and the devcontainer CLI is a `/bin/sh` script that execs node, so a
 /// spoof applied to it would be lost.
 ///
-/// Only for an agent command — `exec bash` must not claim the pane is an agent.
 /// Returns when the spoof doesn't apply; a failed exec is downgraded to a
 /// warning, since an undetected session still beats no session.
-fn spoof_argv0(args: &[String]) {
+fn spoof_argv0(args: &[String], claim: bool) {
     if std::env::var_os(ARGV0_GUARD).is_some() {
         return;
     }
-    let Some(name) = agent_argv0(&args[0]) else {
+    let Some(name) = claimed_argv0(&args[0], claim) else {
         return;
     };
     let Ok(exe) = std::env::current_exe() else {
@@ -131,11 +134,28 @@ fn spoof_argv0(args: &[String]) {
     eprintln!("exec: argv0 re-exec failed ({err}) — herdr won't see an agent here");
 }
 
-/// The argv0 to claim for a command, if herdr would recognise it as an agent.
-fn agent_argv0(command: &str) -> Option<&'static str> {
+/// Which argv0 to claim, if any.
+///
+/// Normally it comes from the command: `exec claude` claims the pane, and
+/// anything else leaves it alone. `--agent` claims it regardless, which is what
+/// an interactive shell needs — herdr only ever sees the *host* side of the pane,
+/// so a `claude` started later inside the container changes nothing it can
+/// observe. The claim has to be in place before the shell is.
+fn claimed_argv0(command: &str, claim: bool) -> Option<&'static str> {
+    if claim {
+        return Some(DEFAULT_AGENT);
+    }
     match Path::new(command).file_name()?.to_str()? {
-        "claude" => Some("claude"),
+        "claude" => Some(DEFAULT_AGENT),
         _ => None,
+    }
+}
+
+/// Strip a leading `--agent`, which claims the pane whatever we end up running.
+fn split_agent_flag(args: &[String]) -> (bool, &[String]) {
+    match args.split_first() {
+        Some((flag, rest)) if flag == "--agent" => (true, rest),
+        _ => (false, args),
     }
 }
 
@@ -272,12 +292,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_claude_claims_the_pane_as_an_agent() {
-        assert_eq!(agent_argv0("claude"), Some("claude"));
-        assert_eq!(agent_argv0("/usr/local/bin/claude"), Some("claude"));
-        assert_eq!(agent_argv0("bash"), None);
-        assert_eq!(agent_argv0("/bin/zsh"), None);
-        assert_eq!(agent_argv0(""), None);
+    fn only_claude_claims_the_pane_by_command_name() {
+        assert_eq!(claimed_argv0("claude", false), Some("claude"));
+        assert_eq!(
+            claimed_argv0("/usr/local/bin/claude", false),
+            Some("claude")
+        );
+        assert_eq!(claimed_argv0("bash", false), None);
+        assert_eq!(claimed_argv0("/bin/zsh", false), None);
+        assert_eq!(claimed_argv0("", false), None);
+    }
+
+    #[test]
+    fn the_agent_flag_claims_the_pane_for_any_command() {
+        // What `make shell` needs: the claim is in place before the shell is,
+        // because a `claude` started inside the container is invisible to herdr.
+        assert_eq!(claimed_argv0("bash", true), Some("claude"));
+        assert_eq!(claimed_argv0("/bin/zsh", true), Some("claude"));
+    }
+
+    #[test]
+    fn agent_flag_is_stripped_from_the_container_command() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let shell = args(&["--agent", "bash"]);
+        assert_eq!(split_agent_flag(&shell), (true, &shell[1..]));
+
+        let session = args(&["claude", "--continue"]);
+        assert_eq!(split_agent_flag(&session), (false, &session[..]));
+
+        // Only leading, so it can't swallow a flag meant for the command itself.
+        let passthrough = args(&["claude", "--agent"]);
+        assert_eq!(split_agent_flag(&passthrough), (false, &passthrough[..]));
     }
 
     #[test]
