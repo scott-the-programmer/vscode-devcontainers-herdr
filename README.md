@@ -1,17 +1,16 @@
 # herdr-devcontainer-status
 
 A herdr plugin that makes VS Code devcontainers legible to herdr — and
-makes a Claude Code session running *inside* one show up as a normal herdr agent.
+makes an agent session running *inside* one show up as a normal herdr agent.
 
 ## The problem
 
-1. **You can't tell from a pane whether its project's devcontainer is up.** herdr shows panes;
-   Docker knows about containers; nothing connects the two.
-2. **`devcontainer exec claude` is invisible to herdr.** herdr identifies a pane's agent by
-   scanning the foreground process group for a process named `claude` — across the exec
-   boundary all it sees is the devcontainer CLI. And herdr's agent-state hook inside the
-   container has no pane identity and no socket to report on, because Docker Desktop can't
-   bind-mount a unix socket.
+herdr shows panes, Docker knows about containers, and nothing connects the two — so a pane
+can't tell you whether its project's devcontainer is up.
+
+Coding harnesses such as Claude Code, OpenCode and Pi do not show up in herdr by default when
+they run inside one. This binary attempts to simplify the process by starting a session with a
+thin relay to feed back agent information to herdr.
 
 ## What it does
 
@@ -23,35 +22,45 @@ One host binary with three jobs:
 | `exec [--agent] <cmd>` | host | runs `<cmd>` in the container, forwards the pane's herdr identity in, and re-execs itself as `argv0=claude` so herdr matches the pane |
 | `bridge` / `relay` | host / container | a loopback TCP hop that presents herdr's control socket inside the container |
 
-The repo is also its own test fixture: it carries a `.devcontainer/`, so opening a herdr pane
-here exercises the detection path.
+## Requirements
+
+- [Rust](https://rustup.rs) — the plugin is built from source on install
+- [Docker](https://docs.docker.com/get-started/get-docker/)
+- [`devcontainer` CLI](https://github.com/devcontainers/cli) — `npm i -g @devcontainers/cli`
 
 ## Getting started
 
-Requires a Rust toolchain, Docker, and the [`devcontainer` CLI](https://github.com/devcontainers/cli)
-on the host. The binary always runs on the **host** — never build or run it inside the container.
-
 ```sh
-./build.sh                        # compile to ./bin/herdr-devcontainer-status
-herdr plugin link "$(pwd)"        # register with herdr
+herdr plugin install scott-the-programmer/vscode-devcontainers-herdr
 ```
 
-Then, from a herdr pane in this repo:
+Then open a herdr pane in any project with a `.devcontainer/`. The pane shows that project's
+container state, and `herdr-devcontainer-status exec claude` runs an agent inside it that herdr
+tracks like a host-side one.
+
+## Contributing
+
+The binary always runs on the **host** — never build or run it inside the container.
+
+```sh
+./build.sh                    # compile to ./bin/herdr-devcontainer-status
+herdr plugin link "$(pwd)"    # use this checkout instead of an installed copy
+```
+
+This repo carries a `.devcontainer/` of its own, so it doubles as the test fixture. From a
+herdr pane here:
 
 ```sh
 make up        # create/start the devcontainer
 make status    # what the plugin reports for this pane
 make claude    # run Claude in the container, visible in `herdr agent list`
 make shell     # shell in, claiming the pane as an agent
+make test      # cargo test
 ```
 
-`make help` lists the rest (`rebuild`, `reshell`, `relay`, `clean`, `e2e`, …).
-
-## More
-
-`.devcontainer/README.md` covers the container itself in depth: credential seeding, why Claude
-Code is baked into the image, the bridge/relay design, and the security tradeoffs of mounting
-host credentials into a container.
+`make help` lists the rest (`rebuild`, `reshell`, `relay`, `clean`, `e2e`, …), and
+`.devcontainer/README.md` covers the container in depth — credential seeding, the bridge/relay
+design, and the security tradeoffs of mounting host credentials into a container.
 
 ## License
 
