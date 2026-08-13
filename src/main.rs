@@ -31,6 +31,7 @@ usage: herdr-devcontainer-status <command>
   bridge  <start|stop|status|serve>   host: publish herdr's socket on the loopback port
   relay   <start|stop|status|serve>   container: present that port as a unix socket
           [--container]               ... drive the container's relay from the host
+  --version                           print the version this binary was built from
 
 See .devcontainer/README.md § \"Seeing the container's Claude session in herdr\".";
 
@@ -44,6 +45,13 @@ fn main() {
         Some("exec") => exec::run(&args[1..]),
         Some("bridge") => bridge(&args[1..]),
         Some("relay") => relay(&args[1..]),
+        // What build.sh compares against after a download: the same string on
+        // both sides of the install, so a stale or wrong-arch asset can't land
+        // in bin/.
+        Some("--version" | "-V" | "version") => {
+            println!("{}", version_line());
+            0
+        }
         other => {
             eprintln!("{USAGE}");
             if let Some(cmd) = other {
@@ -53,6 +61,12 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// What `build.sh` compares against after a download: the same string on both
+/// sides of the install, so a stale or wrong-arch asset can't land in bin/.
+fn version_line() -> String {
+    format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
 }
 
 fn print_status() -> i32 {
@@ -246,6 +260,14 @@ fn best_match<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_line_is_the_string_build_sh_matches() {
+        assert_eq!(
+            version_line(),
+            format!("herdr-devcontainer-status {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
 
     fn container(state: &str, folder: &str, name: &str) -> docker::Container {
         docker::Container {

@@ -1,0 +1,87 @@
+name: build
+
+# Reusable: called by ci.yml (every PR, no publish) and release.yml (a tag),
+# so a musl or cross-mac break shows up on the PR that caused it, not the tag.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ''
+        description: "ref to build (default: the caller's ref)"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl + static: one linux build per arch that runs on any distro
+          # (Alpine through RHEL) since this crate has no C deps to link
+          # against a distro's glibc.
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, run: true }
+          # Native arm rather than a cross-linker: cross-compiling
+          # aarch64-musl from x86_64 hits rust-lang/rust#136088. The free
+          # arm64 runner only exists for public repos.
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, run: true }
+          - { target: aarch64-apple-darwin, os: macos-15, run: true }
+          # Cross from the arm mac: ld64 and the SDK are universal, so this
+          # needs nothing extra — but don't assume Rosetta to run the result.
+          - { target: x86_64-apple-darwin, os: macos-15, run: false }
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # No musl-tools and no linker override: every dependency here (serde,
+      # serde_json, libc) is pure Rust, so rustup's self-contained musl CRT
+      # objects link with the stock cc. Forcing musl-gcc breaks the
+      # static-pie rustc emits.
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: sanity check
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=target/${{ matrix.target }}/release/herdr-devcontainer-status
+          file "$bin"
+          case "${{ matrix.target }}" in
+            *-linux-musl)
+              ldd "$bin" 2>&1 | grep -q 'not a dynamic executable\|statically linked'
+              ;;
+          esac
+          if [ "${{ matrix.run }}" = "true" ]; then
+            version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+            test "$("$bin" --version)" = "herdr-devcontainer-status $version"
+          fi
+
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          name="herdr-devcontainer-status-v${version}-${{ matrix.target }}"
+          mkdir -p "stage/$name" dist
+          cp "target/${{ matrix.target }}/release/herdr-devcontainer-status" "stage/$name/"
+          cp LICENSE README.md "stage/$name/"
+          tar -C "stage/$name" -czf "dist/${name}.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error

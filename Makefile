@@ -28,8 +28,11 @@ build: $(BIN) ## Build the host binary into ./bin (via build.sh)
 # A file target, not .PHONY: `claude`, `shell` and `relay` all run through this
 # binary now, and rebuilding it on every one of them would add a cargo run to
 # each session start.
+#
+# --source: this is the dev loop, editing src/ — installing a released binary
+# over that work (build.sh's default) would silently hide it.
 $(BIN): Cargo.toml Cargo.lock build.sh $(wildcard src/*.rs)
-	./build.sh
+	./build.sh --source
 
 test: ## Run cargo tests
 	cargo test
