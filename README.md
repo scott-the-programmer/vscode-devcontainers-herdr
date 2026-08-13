@@ -23,15 +23,25 @@ One host binary with three jobs:
 
 ## Requirements
 
-- [Rust](https://rustup.rs) — the plugin is built from source on install
 - [Docker](https://docs.docker.com/get-started/get-docker/)
 - [`devcontainer` CLI](https://github.com/devcontainers/cli) — `npm i -g @devcontainers/cli`
+- [Rust](https://rustup.rs) — only if there's no prebuilt binary for your platform (see below), or
+  you're building from a checkout
 
 ## Getting started
 
 ```sh
 herdr plugin install scott-the-programmer/vscode-devcontainers-herdr
 ```
+
+`herdr plugin install` clones the repo and runs `./build.sh`, which downloads the release binary
+matching that checkout's version for your platform — macOS and Linux, x86_64 and arm64 — verifies
+it against the release's `SHA256SUMS`, and installs it. If no prebuilt binary covers your
+platform, or the download fails, it falls back to `cargo build` (needs Rust). `SHA256SUMS` is an
+integrity check, not provenance; releases also carry a
+[build provenance attestation](https://github.com/scott-the-programmer/vscode-devcontainers-herdr/attestations),
+which you can verify out of band with `gh attestation verify --repo
+scott-the-programmer/vscode-devcontainers-herdr <tarball>`.
 
 Then open a herdr pane in any project with a `.devcontainer/`. The pane shows that project's
 container state, and `herdr-devcontainer-status exec claude` runs an agent inside it that herdr
@@ -42,9 +52,12 @@ tracks like a host-side one.
 The binary always runs on the **host** — never build or run it inside the container.
 
 ```sh
-./build.sh                    # compile to ./bin/herdr-devcontainer-status
-herdr plugin link "$(pwd)"    # use this checkout instead of an installed copy
+./build.sh --source            # compile to ./bin/herdr-devcontainer-status (what `make build` runs)
+herdr plugin link "$(pwd)"     # use this checkout instead of an installed copy
 ```
+
+`./build.sh` with no flags tries a prebuilt download first, same as `herdr plugin install` —
+`HERDR_PLUGIN_BUILD=prebuilt ./build.sh` is useful for debugging just that path.
 
 This repo carries a `.devcontainer/` of its own, so it doubles as the test fixture. From a
 herdr pane here:

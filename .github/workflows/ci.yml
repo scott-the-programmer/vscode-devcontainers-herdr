@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+      - run: sh ./.github/scripts/check-version.sh
+      - run: make check # clippy -D warnings + fmt --check
+      - run: make test # cargo test
+
+  # Builds the full release matrix without publishing, so a musl or
+  # cross-mac break fails the PR that caused it, not the tag.
+  build:
+    uses: ./.github/workflows/build.yml

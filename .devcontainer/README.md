@@ -39,11 +39,14 @@ fine, but *running* the plugin from inside it will not match paths:
 in-container run can translate. For real end-to-end verification, build via
 `./build.sh` on the host and let herdr invoke the binary there.
 
-`build.sh` installs by writing `bin/.herdr-devcontainer-status.new` and renaming
-it into place. That's not tidiness: overwriting a macOS binary that has already
-been run leaves the kernel's cached code signature mismatched, and every later
-exec then dies with `SIGKILL` before `main` — no output, exit 137. Easy to miss
-before `make claude`/`shell`/`relay` started running this binary every session.
+`build.sh` may get that binary from a release download now rather than a
+`cargo build` (see the root README) — either way it installs by writing
+`bin/.herdr-devcontainer-status.new` and renaming it into place, whether that
+file came off disk from `cargo` or out of an extracted tarball. That's not
+tidiness: overwriting a macOS binary that has already been run leaves the
+kernel's cached code signature mismatched, and every later exec then dies with
+`SIGKILL` before `main` — no output, exit 137. Easy to miss before `make
+claude`/`shell`/`relay` started running this binary every session.
 
 ## Claude Code in the container
 
