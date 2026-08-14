@@ -197,13 +197,25 @@ Docker Desktop forwards `host.docker.internal` to the host's `127.0.0.1`, so the
 herdr control socket never reaches the LAN.
 
 Both ends are the same binary, which means the container needs a **linux build of
-it**. `exec` gets one by running `cargo build --release` in the container before
-each session — unconditionally, because after any change to this crate what's in
-`target/release` is last session's binary. It's a no-op in the steady state, the
-first one takes a minute, and `target/` is a named volume so it never touches the
-host-arch binary `build.sh` produces. Not cross-compiled from the host: that
-needs a linux linker the host doesn't have, and the image that would carry a
-pre-built artifact is the thing that compiles it.
+it**. Not cross-compiled from the host at exec time: that needs a linux linker
+the host doesn't have. Instead `build.sh` cross-fetches both linux targets
+(`x86_64`/`aarch64`-unknown-linux-musl, static) from the release alongside the
+host binary, into `bin/linux/<triple>/` next to it. `exec` then `docker cp`s
+whichever one matches the container's `uname -m` into `/tmp` the first time a
+session needs one — one `devcontainer exec` round trip to check, so it's a
+no-op in the steady state — and marks it executable. `/tmp` isn't persisted, so
+a container restart just means the next `exec` re-pushes it, and the pushed
+binary carries its own version, so a stale copy from before a plugin upgrade
+is never picked up by accident.
+
+This works in **any** project's container, not just this crate's own — the old
+version of this binary ran `cargo build --release` in the container instead,
+which only worked here, where the container happens to have both a Rust
+toolchain and this crate's `Cargo.toml` at the workspace root. That path still
+exists as a last-resort fallback for a source install with no bundled relay
+binaries (`HERDR_PLUGIN_BUILD=source` before any release existed, or
+`HERDR_PLUGIN_RELAY=0`), but only when the container really is this crate's own
+checkout — it refuses to build an unrelated project.
 
 **2. herdr identifies a pane's agent by `argv0`, not by the reported session.**
 It scans the pane's foreground process group for a known name; all the host can
@@ -249,7 +261,8 @@ Consequences worth knowing:
 - **`postStartCommand` doesn't start the relay.** It used to. A relay is only
   useful to a session that also has `HERDR_PANE_ID`, and only `exec` can supply
   that — so `exec` starts it, idempotently, before each session. Starting one at
-  container start would mean a cargo build for a forwarder nothing would talk to.
+  container start would mean pushing (or building) a forwarder nothing would
+  talk to yet.
 - **Not herdr's problem, but visible in the same place:** plugin hooks seeded
   in from the host's `~/.claude` config sometimes shell out to `node`. The
   Rust base image doesn't have one, so `devcontainer.json` adds the

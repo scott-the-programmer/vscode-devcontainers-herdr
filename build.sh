@@ -124,38 +124,37 @@ install_binary() {
   mv -f "bin/.$BIN.new" "bin/$BIN"
 }
 
-install_prebuilt() {
-  triple="$(target_triple)" || {
-    note "no published build for $(uname -s)/$(uname -m)"
-    return 1
-  }
-
+# Fetch + checksum-verify + unpack one release asset, leaving $2/$BIN in
+# place on success. Shared by the host install path below (which then
+# Gatekeeper-clears and version-checks its result) and install_relay_assets
+# (which just copies its result into bin/linux/<triple>/).
+download_verified() { # triple workdir
+  triple="$1"
+  workdir="$2"
   asset="$BIN-v$VERSION-$triple.tar.gz"
   base="${HERDR_PLUGIN_BASE_URL:-https://github.com/$REPO/releases/download/v$VERSION}"
 
-  WORK="$(mktemp -d "${TMPDIR:-/tmp}/$BIN.XXXXXX")" || return 1
-
   echo "fetching $asset"
-  fetch "$base/$asset" "$WORK/$asset" || {
+  fetch "$base/$asset" "$workdir/$asset" || {
     note "no release asset $asset"
     return 1
   }
-  fetch "$base/SHA256SUMS" "$WORK/SHA256SUMS" || {
+  fetch "$base/SHA256SUMS" "$workdir/SHA256SUMS" || {
     note "no SHA256SUMS for v$VERSION"
     return 1
   }
 
-  want="$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1; exit }' "$WORK/SHA256SUMS")"
+  want="$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1; exit }' "$workdir/SHA256SUMS")"
   [ -n "$want" ] || {
     note "$asset is not listed in SHA256SUMS"
     return 1
   }
-  got="$(sha256_of "$WORK/$asset")" || {
+  got="$(sha256_of "$workdir/$asset")" || {
     note "no sha256 tool here; not trusting the download"
     return 1
   }
   # Not a fallback case: a mismatch is corruption or tampering, and quietly
-  # compiling instead would bury it.
+  # continuing (compiling instead, or shipping the file anyway) would bury it.
   [ "$want" = "$got" ] || {
     echo "error: checksum mismatch for $asset" >&2
     echo "  expected $want" >&2
@@ -163,15 +162,31 @@ install_prebuilt() {
     exit 1
   }
 
-  (cd "$WORK" && tar -xzf "$asset") || {
+  (cd "$workdir" && tar -xzf "$asset") || {
     note "cannot unpack $asset"
     return 1
   }
-  [ -f "$WORK/$BIN" ] || {
+  [ -f "$workdir/$BIN" ] || {
     note "$asset does not contain $BIN"
     return 1
   }
-  chmod +x "$WORK/$BIN"
+  chmod +x "$workdir/$BIN"
+}
+
+# Set by install_prebuilt on success, so install_relay_assets can reuse the
+# download instead of fetching it a second time when the host itself is one
+# of the two linux-musl targets.
+HOST_TRIPLE=
+HOST_BINARY=
+
+install_prebuilt() {
+  triple="$(target_triple)" || {
+    note "no published build for $(uname -s)/$(uname -m)"
+    return 1
+  }
+
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/$BIN.XXXXXX")" || return 1
+  download_verified "$triple" "$WORK" || return 1
 
   # curl and wget don't set com.apple.quarantine — but a tarball a human fetched
   # in a browser does, and Gatekeeper refuses an ad-hoc-signed binary that
@@ -192,6 +207,47 @@ install_prebuilt() {
 
   install_binary "$WORK/$BIN"
   echo "installed bin/$BIN $VERSION (prebuilt, $triple)"
+  HOST_TRIPLE="$triple"
+  HOST_BINARY="$WORK/$BIN"
+}
+
+## --- relay binaries -----------------------------------------------------------
+
+# The two targets build.yml's release matrix publishes for linux — static
+# musl, so they run in any container regardless of distro or libc. `exec`
+# `docker cp`s whichever one matches a target container's `uname -m` in, so it
+# can report agent state into *any* project's container, not just a checkout
+# of this crate with its own Rust toolchain (what `exec` used to require).
+LINUX_TRIPLES="x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
+
+# Best-effort: status detection is the plugin's primary job and must still
+# install whether or not this succeeds. HERDR_PLUGIN_RELAY=0 skips it — no
+# `exec` on this host, no need for the extra download.
+install_relay_assets() {
+  if [ "${HERDR_PLUGIN_RELAY:-1}" = "0" ]; then
+    note "HERDR_PLUGIN_RELAY=0: skipping the bundled relay binaries"
+    return 0
+  fi
+  for triple in $LINUX_TRIPLES; do
+    dest="bin/linux/$triple"
+    if [ "$triple" = "$HOST_TRIPLE" ] && [ -n "$HOST_BINARY" ]; then
+      mkdir -p "$dest"
+      cp "$HOST_BINARY" "$dest/$BIN"
+      chmod +x "$dest/$BIN"
+      echo "installed $dest/$BIN $VERSION (reused host download)"
+      continue
+    fi
+    relay_work="$(mktemp -d "${TMPDIR:-/tmp}/$BIN-relay.XXXXXX")" || continue
+    if download_verified "$triple" "$relay_work"; then
+      mkdir -p "$dest"
+      cp "$relay_work/$BIN" "$dest/$BIN"
+      chmod +x "$dest/$BIN"
+      echo "installed $dest/$BIN $VERSION (relay binary)"
+    else
+      note "no relay binary for $triple — 'exec' will fall back to building one in the target container"
+    fi
+    rm -rf "$relay_work"
+  done
 }
 
 ## --- source -------------------------------------------------------------------
@@ -247,17 +303,23 @@ no_toolchain() {
 case "$MODE" in
   source)
     build_from_source || no_toolchain
+    install_relay_assets
     ;;
   prebuilt)
     install_prebuilt || {
       echo "error: no usable prebuilt binary for v$VERSION" >&2
       exit 1
     }
+    install_relay_assets
     ;;
   auto)
-    install_prebuilt && exit 0
+    if install_prebuilt; then
+      install_relay_assets
+      exit 0
+    fi
     note "falling back to a source build"
     build_from_source || no_toolchain
+    install_relay_assets
     ;;
   *)
     echo "build.sh: HERDR_PLUGIN_BUILD must be auto|prebuilt|source" >&2

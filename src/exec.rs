@@ -29,6 +29,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::docker;
 use crate::settings;
 use crate::supervise;
 
@@ -38,19 +39,53 @@ const ARGV0_GUARD: &str = "HERDR_EXEC_ARGV0";
 /// The only agent this repo's container runs, and the argv0 herdr matches on.
 const DEFAULT_AGENT: &str = "claude";
 
-/// Runs in the container in one `devcontainer exec` round trip. The relay is this
-/// same binary built for linux, and `target/` is a named volume the host cannot
-/// see — so "is it built yet?" has to be asked in here, not on the host. Round
-/// trips are what cost: the CLI starts node each time.
+/// This binary's own version — what a container-side candidate has to report
+/// from `--version` before we'll trust it, and the suffix on the path we
+/// `docker cp` a bundled binary to. Same string `build.sh` compares after a
+/// download, so a stale or wrong-arch relay can't be picked up silently.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// One `devcontainer exec` round trip: resolve the container's own `$HOME`
+/// (killing the old hard-coded `/home/vscode` assumption — any `remoteUser`
+/// works), find a relay binary that reports our exact version, and either run
+/// it or report which CPU architecture needs one. `container_relay` docker-cps
+/// one in on the first miss and retries once.
+///
+/// Lookup order is deliberately open to a future devcontainer feature that
+/// installs `herdr-devcontainer-status` onto `PATH` itself: candidate 2 finds
+/// that with no plugin change at all, and nothing is pushed when it does.
 const RELAY_BOOTSTRAP: &str = r#"set -eu
+ver="$1"; verb="$2"
+sock="${HOME:-/root}/.herdr/herdr.sock"
+mkdir -p "$(dirname "$sock")" 2>/dev/null || true
+echo "herdr-socket=$sock"
+for cand in ${HERDR_RELAY_BIN:-} "$(command -v herdr-devcontainer-status 2>/dev/null || true)" "/tmp/herdr-devcontainer-status-$ver"; do
+  [ -n "$cand" ] && [ -x "$cand" ] || continue
+  [ "$("$cand" --version 2>/dev/null)" = "herdr-devcontainer-status $ver" ] || continue
+  HERDR_SOCKET_PATH="$sock" exec "$cand" relay "$verb"
+done
+echo "herdr-need=$(uname -m)"
+exit 42
+"#;
+
+/// Fallback for a source install (or a fork with no release assets, so
+/// `build.sh` never bundled a linux binary): build in the container, but only
+/// when it is unmistakably *our own* crate, never an unrelated project's —
+/// this is what used to run unconditionally and broke on any other project's
+/// container.
+const SOURCE_FALLBACK: &str = r#"set -eu
+verb="$1"
+sock="${HOME:-/root}/.herdr/herdr.sock"
+if [ ! -f Cargo.toml ] || ! grep -q '^name = "herdr-devcontainer-status"' Cargo.toml; then
+  echo "exec: no bundled relay binary, and this container isn't the plugin's own crate" >&2
+  exit 1
+fi
+mkdir -p "$(dirname "$sock")" 2>/dev/null || true
 bin=target/release/herdr-devcontainer-status
-# Always build, rather than building only when the file is missing: after any
-# change to this crate what's in there is last session's binary, which may not
-# have the subcommand we're about to run. Quiet, because in the steady state this
-# is a no-op — but say something before the one build that takes a minute.
 [ -x "$bin" ] || echo "relay: building the container-side relay (first run only)" >&2
 cargo build --release --locked --quiet
-exec "$bin" relay "$1"
+echo "herdr-socket=$sock"
+HERDR_SOCKET_PATH="$sock" exec "$bin" relay "$verb"
 "#;
 
 pub fn run(args: &[String]) -> i32 {
@@ -90,15 +125,25 @@ pub fn run(args: &[String]) -> i32 {
     spoof_argv0(args, claim);
 
     // Non-fatal, both of them: a missing bridge or relay costs agent state in
-    // herdr, not the session.
+    // herdr, not the session. A relay failure still needs *some* socket path
+    // to advertise, so the hook has a consistent (if unreachable) target to
+    // fail against rather than none at all.
     report(supervise::bridge().start(&|| crate::forward::tcp_answers(settings::port())));
-    report(container_relay(&cli, &root, "start"));
+    let socket = container_relay(&cli, &root, "start").unwrap_or_else(|msg| {
+        eprintln!("{msg}");
+        settings::CONTAINER_SOCKET.to_string()
+    });
 
     // No exec: this process is the pane's `claude` for detection purposes, so it
     // has to outlive the call. Claude puts the tty in raw mode, so Ctrl-C reaches
     // it as a keypress rather than a signal to this process group — no signal
     // plumbing here.
-    wait(devcontainer(&cli, &root, &session_env(&pane), args))
+    wait(devcontainer(
+        &cli,
+        &root,
+        &session_env(&pane, &socket),
+        args,
+    ))
 }
 
 /// herdr decides *which* agent a pane is running by scanning the pane's
@@ -159,12 +204,14 @@ fn split_agent_flag(args: &[String]) -> (bool, &[String]) {
     }
 }
 
-/// The variables the hook needs; it exits 0 on the first one missing.
-fn session_env(pane: &str) -> Vec<(&'static str, String)> {
+/// The variables the hook needs; it exits 0 on the first one missing. `socket`
+/// is whatever `container_relay` resolved the container's own home to be —
+/// never assume `/home/vscode`, since `remoteUser` isn't always `vscode`.
+fn session_env(pane: &str, socket: &str) -> Vec<(&'static str, String)> {
     vec![
         ("HERDR_ENV", "1".to_string()),
         ("HERDR_PANE_ID", pane.to_string()),
-        ("HERDR_SOCKET_PATH", settings::CONTAINER_SOCKET.to_string()),
+        ("HERDR_SOCKET_PATH", socket.to_string()),
         ("HERDR_RELAY_PORT", settings::port().to_string()),
     ]
 }
@@ -206,25 +253,203 @@ pub fn relay_in_container(verb: &str) -> i32 {
     }
 }
 
-/// Run one relay verb in the container, passing the socket path and port the host
-/// side advertises so the two ends can't disagree about either.
+/// What `RELAY_BOOTSTRAP` found, parsed from its stdout.
+enum Probe {
+    /// A candidate ran; this is the socket it bound (`HOME/.herdr/herdr.sock`
+    /// resolved *inside* the container).
+    Ready(String),
+    /// No candidate matched our version; the container's `uname -m`, so the
+    /// caller knows which musl triple to push.
+    NeedsBinary(String),
+}
+
+/// Resolve a working container-side relay and run `verb` against it, pushing
+/// a bundled musl binary in via `docker cp` on the first miss and retrying
+/// once. Returns the `HERDR_SOCKET_PATH` the relay ended up bound to.
 fn container_relay(cli: &Path, root: &Path, verb: &str) -> Result<String, String> {
-    let env = vec![
-        ("HERDR_SOCKET_PATH", settings::CONTAINER_SOCKET.to_string()),
-        ("HERDR_RELAY_PORT", settings::port().to_string()),
-        ("HERDR_RELAY_HOST", settings::relay_host()),
-    ];
-    let bootstrap = [
+    let arch = match probe_relay(cli, root, verb)? {
+        Probe::Ready(socket) => return Ok(socket),
+        Probe::NeedsBinary(arch) => arch,
+    };
+    if let Err(push_err) = push_relay_binary(root, &arch) {
+        // No bundled binary for this arch (or the push itself failed): the
+        // only other way to get a relay running is to build it in place, and
+        // only when the container is unmistakably our own crate.
+        return probe_source_fallback(cli, root, verb).map_err(|_| push_err);
+    }
+    match probe_relay(cli, root, verb)? {
+        Probe::Ready(socket) => Ok(socket),
+        Probe::NeedsBinary(arch) => Err(format!(
+            "exec: pushed a relay binary but the container ({arch}) still can't run it"
+        )),
+    }
+}
+
+/// Run `RELAY_BOOTSTRAP` and interpret what it found.
+fn probe_relay(cli: &Path, root: &Path, verb: &str) -> Result<Probe, String> {
+    let script = [
         "sh".to_string(),
         "-c".to_string(),
         RELAY_BOOTSTRAP.to_string(),
         "relay-bootstrap".to_string(),
+        VERSION.to_string(),
         verb.to_string(),
     ];
-    match devcontainer(cli, root, &env, &bootstrap).status() {
-        Ok(s) if s.success() => Ok(String::new()),
-        Ok(_) => Err("exec: container relay unavailable — agent state won't reach herdr".into()),
-        Err(e) => Err(format!("exec: cannot run the devcontainer CLI: {e}")),
+    let out = run_bootstrap(cli, root, &script)?;
+    let (socket, need) = parse_bootstrap_output(&out.stdout);
+    if let Some(arch) = need {
+        return Ok(Probe::NeedsBinary(arch));
+    }
+    if out.success {
+        socket
+            .map(Probe::Ready)
+            .ok_or_else(|| "exec: relay bootstrap produced no socket path".to_string())
+    } else {
+        Err("exec: container relay unavailable — agent state won't reach herdr".into())
+    }
+}
+
+/// Run `SOURCE_FALLBACK` — only reached when no bundled binary could be
+/// pushed in. Guarded by the script itself against building an unrelated
+/// project.
+fn probe_source_fallback(cli: &Path, root: &Path, verb: &str) -> Result<String, String> {
+    let script = [
+        "sh".to_string(),
+        "-c".to_string(),
+        SOURCE_FALLBACK.to_string(),
+        "relay-source-fallback".to_string(),
+        verb.to_string(),
+    ];
+    let out = run_bootstrap(cli, root, &script)?;
+    if !out.success {
+        return Err("exec: container relay unavailable — agent state won't reach herdr".into());
+    }
+    let (socket, _) = parse_bootstrap_output(&out.stdout);
+    socket.ok_or_else(|| "exec: relay bootstrap produced no socket path".to_string())
+}
+
+/// One `devcontainer exec` round trip running a bootstrap script, with its
+/// stdout captured for parsing and everything else — the relay's own
+/// start/stop/status messages, cargo's build banner, stderr — forwarded live
+/// so the session doesn't go quiet during the one build that takes a minute.
+struct BootstrapOutput {
+    success: bool,
+    stdout: String,
+}
+
+fn run_bootstrap(cli: &Path, root: &Path, script: &[String]) -> Result<BootstrapOutput, String> {
+    let env = vec![
+        ("HERDR_RELAY_PORT", settings::port().to_string()),
+        ("HERDR_RELAY_HOST", settings::relay_host()),
+    ];
+    let out = devcontainer(cli, root, &env, script)
+        .output()
+        .map_err(|e| format!("exec: cannot run the devcontainer CLI: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    for line in stdout.lines() {
+        if !line.starts_with("herdr-socket=") && !line.starts_with("herdr-need=") {
+            eprintln!("{line}");
+        }
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !stderr.trim().is_empty() {
+        eprint!("{stderr}");
+    }
+    Ok(BootstrapOutput {
+        success: out.status.success(),
+        stdout,
+    })
+}
+
+/// Pull `herdr-socket=`/`herdr-need=` markers back out of a bootstrap
+/// script's stdout — see `RELAY_BOOTSTRAP`/`SOURCE_FALLBACK`.
+fn parse_bootstrap_output(stdout: &str) -> (Option<String>, Option<String>) {
+    let mut socket = None;
+    let mut need = None;
+    for line in stdout.lines() {
+        if let Some(v) = line.strip_prefix("herdr-socket=") {
+            socket = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("herdr-need=") {
+            need = Some(v.to_string());
+        }
+    }
+    (socket, need)
+}
+
+/// `docker cp` a bundled musl binary matching `arch` into the container's
+/// `/tmp`, then mark it executable. `/tmp` is deliberately not persisted: a
+/// restarted container needs a restarted relay anyway, and the next `exec`
+/// re-pushes automatically via `probe_relay` above.
+fn push_relay_binary(root: &Path, arch: &str) -> Result<(), String> {
+    let triple = musl_triple(arch)
+        .ok_or_else(|| format!("exec: no relay binary published for container arch {arch}"))?;
+    let local = bundled_relay_binary(triple)?;
+    let container = container_name(root)?;
+    let dest = format!("/tmp/herdr-devcontainer-status-{VERSION}");
+
+    let cp = Command::new("docker")
+        .arg("cp")
+        .arg(&local)
+        .arg(format!("{container}:{dest}"))
+        .status()
+        .map_err(|e| format!("exec: docker cp: {e}"))?;
+    if !cp.success() {
+        return Err(format!("exec: docker cp to {container} failed"));
+    }
+
+    let chmod = Command::new("docker")
+        .args(["exec", &container, "chmod", "+x", &dest])
+        .status()
+        .map_err(|e| format!("exec: docker exec chmod: {e}"))?;
+    if !chmod.success() {
+        return Err(format!(
+            "exec: could not mark {dest} executable in {container}"
+        ));
+    }
+    Ok(())
+}
+
+/// Which container `root`'s devcontainer runs as — `docker::container_for`,
+/// the same match (dogfood fallback included) `main::detect` uses for
+/// status, so `exec` and the status hook can never disagree about which
+/// container a project's pane means.
+fn container_name(root: &Path) -> Result<String, String> {
+    let containers = docker::list()?;
+    docker::container_for(&containers, root)
+        .map(|c| c.name.clone())
+        .ok_or_else(|| format!("exec: no container labelled for {}", root.display()))
+}
+
+/// `build.sh` bundles both linux targets next to the host binary at
+/// `bin/linux/<triple>/`, resolved relative to *this* executable rather than
+/// `$HERDR_PLUGIN_ROOT` — unset when `make claude` runs the binary directly.
+fn bundled_relay_binary(triple: &str) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("exec: {e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "exec: current executable has no parent directory".to_string())?;
+    let path = dir
+        .join("linux")
+        .join(triple)
+        .join("herdr-devcontainer-status");
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "exec: no bundled relay binary at {} — reinstall with `herdr plugin install`, \
+             or set HERDR_RELAY_BIN in the container to one you provide yourself",
+            path.display()
+        ))
+    }
+}
+
+/// The two targets `build.yml`'s release matrix publishes for linux — static
+/// musl, so they run in any container regardless of distro or libc.
+fn musl_triple(arch: &str) -> Option<&'static str> {
+    match arch {
+        "x86_64" | "amd64" => Some("x86_64-unknown-linux-musl"),
+        "aarch64" | "arm64" => Some("aarch64-unknown-linux-musl"),
+        _ => None,
     }
 }
 
@@ -328,14 +553,15 @@ mod tests {
 
     #[test]
     fn session_env_carries_everything_the_hook_requires() {
-        let env = session_env("w9:p3");
+        let env = session_env("w9:p3", "/home/node/.herdr/herdr.sock");
         let keys: Vec<&str> = env.iter().map(|(k, _)| *k).collect();
         assert!(keys.contains(&"HERDR_ENV"));
         assert!(keys.contains(&"HERDR_PANE_ID"));
         assert!(keys.contains(&"HERDR_SOCKET_PATH"));
         let sock = env.iter().find(|(k, _)| *k == "HERDR_SOCKET_PATH").unwrap();
-        // The container's socket, never the host's.
-        assert_eq!(sock.1, settings::CONTAINER_SOCKET);
+        // Whatever container_relay resolved, e.g. a non-vscode remoteUser —
+        // never a hard-coded home directory.
+        assert_eq!(sock.1, "/home/node/.herdr/herdr.sock");
         let pane = env.iter().find(|(k, _)| *k == "HERDR_PANE_ID").unwrap();
         assert_eq!(pane.1, "w9:p3");
     }
@@ -345,7 +571,7 @@ mod tests {
         let cmd = devcontainer(
             Path::new("/bin/devcontainer"),
             Path::new("/p/api"),
-            &session_env("w9:p3"),
+            &session_env("w9:p3", "/home/vscode/.herdr/herdr.sock"),
             &["claude".to_string(), "--continue".to_string()],
         );
         let args: Vec<String> = cmd
@@ -400,11 +626,60 @@ mod tests {
     }
 
     #[test]
-    fn relay_bootstrap_builds_then_runs_the_verb_it_is_given() {
-        // Exercised as `sh -c <script> relay-bootstrap start`, so $1 is the verb.
-        assert!(RELAY_BOOTSTRAP.contains("cargo build --release --locked"));
-        assert!(RELAY_BOOTSTRAP.contains(r#"exec "$bin" relay "$1""#));
-        // Unconditional: a stale binary is the failure mode a file check misses.
-        assert!(!RELAY_BOOTSTRAP.contains("if [ ! -x"));
+    fn relay_bootstrap_resolves_home_and_reports_what_it_needs() {
+        // Exercised as `sh -c <script> relay-bootstrap <version> <verb>`.
+        assert!(RELAY_BOOTSTRAP.contains(r#"sock="${HOME:-/root}/.herdr/herdr.sock""#));
+        assert!(RELAY_BOOTSTRAP.contains(r#"exec "$cand" relay "$verb""#));
+        assert!(RELAY_BOOTSTRAP.contains("herdr-need=$(uname -m)"));
+        assert!(RELAY_BOOTSTRAP.contains("exit 42"));
+        // No unconditional cargo build left in the fast path — that's what
+        // broke on any project that isn't this crate.
+        assert!(!RELAY_BOOTSTRAP.contains("cargo build"));
+    }
+
+    #[test]
+    fn source_fallback_refuses_an_unrelated_project() {
+        assert!(SOURCE_FALLBACK.contains(r#"grep -q '^name = "herdr-devcontainer-status"'"#));
+        assert!(SOURCE_FALLBACK.contains("cargo build --release --locked"));
+    }
+
+    #[test]
+    fn musl_triple_maps_known_arches_and_rejects_the_rest() {
+        assert_eq!(musl_triple("x86_64"), Some("x86_64-unknown-linux-musl"));
+        assert_eq!(musl_triple("amd64"), Some("x86_64-unknown-linux-musl"));
+        assert_eq!(musl_triple("aarch64"), Some("aarch64-unknown-linux-musl"));
+        assert_eq!(musl_triple("arm64"), Some("aarch64-unknown-linux-musl"));
+        assert_eq!(musl_triple("armv7l"), None);
+        assert_eq!(musl_triple(""), None);
+    }
+
+    #[test]
+    fn parses_the_resolved_socket_when_a_candidate_ran() {
+        let stdout = "herdr-socket=/home/node/.herdr/herdr.sock\nrelay: listening on ...\n";
+        assert_eq!(
+            parse_bootstrap_output(stdout),
+            (Some("/home/node/.herdr/herdr.sock".to_string()), None)
+        );
+    }
+
+    #[test]
+    fn parses_the_needed_arch_when_no_candidate_matched() {
+        let stdout = "herdr-socket=/root/.herdr/herdr.sock\nherdr-need=aarch64\n";
+        assert_eq!(
+            parse_bootstrap_output(stdout),
+            (
+                Some("/root/.herdr/herdr.sock".to_string()),
+                Some("aarch64".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn parses_nothing_from_unrelated_output() {
+        assert_eq!(
+            parse_bootstrap_output("relay: already listening\n"),
+            (None, None)
+        );
+        assert_eq!(parse_bootstrap_output(""), (None, None));
     }
 }

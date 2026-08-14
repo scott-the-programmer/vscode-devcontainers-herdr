@@ -17,9 +17,16 @@ One host binary with three jobs:
 
 | subcommand | runs on | what it does |
 | --- | --- | --- |
-| `refresh` / `hook` | host | prints the pane project's devcontainer state as JSON (`running` / `stopped` / `none`) |
+| `refresh` / `hook` | host | prints the pane project's devcontainer state as JSON (`running` / `stopped` / `none`) and reports it to herdr as pane/workspace metadata |
 | `exec [--agent] <cmd>` | host | runs `<cmd>` in the container, forwards the pane's herdr identity in, and re-execs itself as `argv0=claude` so herdr matches the pane |
 | `bridge` / `relay` | host / container | a loopback TCP hop that presents herdr's control socket inside the container |
+
+`exec` works against **any** project's devcontainer, not just checkouts of this crate: it
+`docker cp`s a small statically-linked (musl) copy of this same binary into the target
+container's `/tmp` the first time it's needed, so agent-state reporting doesn't depend on that
+project having a Rust toolchain, or being this crate at all. Nothing to configure — see
+[Contributing](#contributing) if you want to see it work, or `.devcontainer/README.md` for how
+the two ends of the relay fit together.
 
 ## Requirements
 
@@ -43,9 +50,18 @@ integrity check, not provenance; releases also carry a
 which you can verify out of band with `gh attestation verify --repo
 scott-the-programmer/vscode-devcontainers-herdr <tarball>`.
 
-Then open a herdr pane in any project with a `.devcontainer/`. The pane shows that project's
-container state, and `herdr-devcontainer-status exec claude` runs an agent inside it that herdr
-tracks like a host-side one.
+Then open a herdr pane in any project with a `.devcontainer/`. herdr fires the plugin
+automatically on `pane.created`/`pane.focused`/`workspace.focused`, so the pane's devcontainer
+state (`running`/`stopped`/`none`) shows up as a `$devcontainer` metadata token with no command
+to run — add it to a sidebar row to see it:
+
+```toml
+# ~/.config/herdr/config.toml
+ui.sidebar.agents.rows = [["state_icon", "workspace", "tab"], ["agent", "$devcontainer"]]
+```
+
+`herdr-devcontainer-status exec claude` runs an agent inside that container that herdr tracks
+like a host-side one.
 
 ## Contributing
 
@@ -73,6 +89,8 @@ make test      # cargo test
 `make help` lists the rest (`rebuild`, `reshell`, `relay`, `clean`, `e2e`, …), and
 `.devcontainer/README.md` covers the container in depth — credential seeding, the bridge/relay
 design, and the security tradeoffs of mounting host credentials into a container.
+
+Maintainers cutting a release should see [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## License
 

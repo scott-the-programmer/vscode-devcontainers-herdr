@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 /// One devcontainer-labelled container as reported by `docker ps -a`.
@@ -13,6 +14,32 @@ impl Container {
     pub fn is_running(&self) -> bool {
         self.state.eq_ignore_ascii_case("running")
     }
+}
+
+/// Pick the container labelled for `root`. Compose projects put several
+/// containers on one local_folder; prefer a running one so callers don't flap
+/// between it and a stopped sidecar.
+pub fn best_match<'a>(containers: &'a [Container], root: &Path) -> Option<&'a Container> {
+    containers
+        .iter()
+        .filter(|c| Path::new(&c.local_folder) == root)
+        .max_by_key(|c| c.is_running())
+}
+
+/// `best_match`, with the dogfood fallback: when this binary runs *inside*
+/// its own devcontainer against the host daemon (a manual `hook`/`refresh`/
+/// `exec` invocation from a shell in there — see `.devcontainer/README.md`
+/// "The path-mapping caveat"), discovery sees the `/workspaces` bind-mount
+/// path while docker labels still carry the host path.
+/// `HERDR_HOST_WORKSPACE` (set by our own `devcontainer.json`) bridges the
+/// two. Shared by `main::detect` (status) and `exec::container_name` (which
+/// container to `docker cp`/`docker exec` into), so the two can never
+/// disagree about which container a project's pane means.
+pub fn container_for<'a>(containers: &'a [Container], root: &Path) -> Option<&'a Container> {
+    best_match(containers, root).or_else(|| {
+        let host_root = std::path::PathBuf::from(std::env::var_os("HERDR_HOST_WORKSPACE")?);
+        best_match(containers, &host_root)
+    })
 }
 
 // Tab-separated on purpose: with `{{json .}}` docker flattens Labels into one
@@ -100,5 +127,64 @@ mod tests {
     #[test]
     fn empty_output_is_empty_vec() {
         assert!(parse("").is_empty());
+    }
+
+    fn container(state: &str, folder: &str, name: &str) -> Container {
+        Container {
+            state: state.into(),
+            local_folder: folder.into(),
+            config_file: format!("{folder}/.devcontainer/devcontainer.json"),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn prefers_running_container_in_compose_project() {
+        let cs = vec![
+            container("exited", "/p/api", "api-db-1"),
+            container("running", "/p/api", "api-devcontainer-1"),
+        ];
+        let m = best_match(&cs, Path::new("/p/api")).unwrap();
+        assert_eq!(m.name, "api-devcontainer-1");
+    }
+
+    #[test]
+    fn falls_back_to_stopped_container() {
+        let cs = vec![container("exited", "/p/api", "api-db-1")];
+        let m = best_match(&cs, Path::new("/p/api")).unwrap();
+        assert_eq!(m.name, "api-db-1");
+        assert!(!m.is_running());
+    }
+
+    #[test]
+    fn no_match_for_other_project() {
+        let cs = vec![container("running", "/p/api", "api-1")];
+        assert!(best_match(&cs, Path::new("/p/web")).is_none());
+    }
+
+    #[test]
+    fn container_for_falls_back_to_host_workspace_when_set() {
+        // HERDR_HOST_WORKSPACE is process-global and no other test touches it,
+        // so this is safe under cargo test's default parallel threads; restore
+        // it regardless of outcome so a later run never inherits it.
+        let prior = std::env::var_os("HERDR_HOST_WORKSPACE");
+        std::env::set_var("HERDR_HOST_WORKSPACE", "/Users/x/repo");
+        let cs = vec![container("running", "/Users/x/repo", "repo-1")];
+        // Discovery sees the /workspaces bind mount; the label carries the host path.
+        let result = container_for(&cs, Path::new("/workspaces/repo"));
+        match prior {
+            Some(v) => std::env::set_var("HERDR_HOST_WORKSPACE", v),
+            None => std::env::remove_var("HERDR_HOST_WORKSPACE"),
+        }
+        assert_eq!(result.map(|c| c.name.as_str()), Some("repo-1"));
+    }
+
+    #[test]
+    fn container_for_matches_directly_without_needing_the_fallback() {
+        let cs = vec![container("running", "/p/api", "api-1")];
+        assert_eq!(
+            container_for(&cs, Path::new("/p/api")).map(|c| c.name.as_str()),
+            Some("api-1")
+        );
     }
 }

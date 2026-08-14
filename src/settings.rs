@@ -5,10 +5,13 @@ use std::path::PathBuf;
 /// Loopback port the host bridge publishes herdr's socket on.
 pub const DEFAULT_PORT: u16 = 47100;
 
-/// Where the relay listens inside the container. Hard-coded to `remoteUser`'s
-/// home rather than derived, because the host side has to name this path in
-/// `--remote-env HERDR_SOCKET_PATH` before any container process runs; the relay
-/// then binds exactly what it is told, so the two can't drift.
+/// Fallback only — not the path `exec` actually uses. `exec`'s bootstrap
+/// script (`exec::RELAY_BOOTSTRAP`) resolves `$HOME` *inside* the target
+/// container and passes the result as `HERDR_SOCKET_PATH` per exec, since
+/// `remoteUser` isn't always `vscode`. This constant only matters for a
+/// manual `relay serve`/`relay start` run with no `HERDR_SOCKET_PATH` in the
+/// environment at all — e.g. this repo's own dogfood container, where the
+/// user genuinely is `vscode`.
 pub const CONTAINER_SOCKET: &str = "/home/vscode/.herdr/herdr.sock";
 
 /// Docker Desktop forwards this to the host's 127.0.0.1.
