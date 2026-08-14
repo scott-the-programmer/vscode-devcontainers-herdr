@@ -5,24 +5,24 @@ min_herdr_version = "0.7.0"
 description = "Shows the VS Code devcontainer state of each pane's project"
 platforms = ["macos", "linux"]
 
-[build]
+[[build]]
 command = ["./build.sh"]
 
 [[actions]]
-action_id = "refresh"
+id = "refresh"
 title = "Refresh devcontainer status"
 description = "Re-detect devcontainer state for this pane (or all panes in the workspace)"
 contexts = ["pane", "workspace"]
-command = "\"$HERDR_PLUGIN_ROOT/bin/herdr-devcontainer-status\" refresh"
+command = ["./bin/herdr-devcontainer-status", "refresh"]
 
 [[events]]
 on = "pane.created"
-command = "\"$HERDR_PLUGIN_ROOT/bin/herdr-devcontainer-status\" hook"
+command = ["./bin/herdr-devcontainer-status", "hook"]
 
 [[events]]
 on = "pane.focused"
-command = "\"$HERDR_PLUGIN_ROOT/bin/herdr-devcontainer-status\" hook"
+command = ["./bin/herdr-devcontainer-status", "hook"]
 
 [[events]]
 on = "workspace.focused"
-command = "\"$HERDR_PLUGIN_ROOT/bin/herdr-devcontainer-status\" hook --all"
+command = ["./bin/herdr-devcontainer-status", "hook", "--all"]
