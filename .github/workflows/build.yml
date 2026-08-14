@@ -35,7 +35,7 @@ jobs:
           - { target: x86_64-apple-darwin, os: macos-15, run: false }
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
 
@@ -87,7 +87,7 @@ jobs:
           cp LICENSE README.md "stage/$name/"
           tar -C "stage/$name" -czf "dist/${name}.tar.gz" .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target }}
           path: dist/*.tar.gz
