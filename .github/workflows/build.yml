@@ -58,10 +58,17 @@ jobs:
         run: |
           set -euo pipefail
           bin=target/${{ matrix.target }}/release/herdr-devcontainer-status
-          file "$bin"
+          info=$(file -b "$bin")
+          echo "$info"
           case "${{ matrix.target }}" in
             *-linux-musl)
-              ldd "$bin" 2>&1 | grep -q 'not a dynamic executable\|statically linked'
+              # rustc emits static-pie on x86_64-musl and a plain static ET_EXEC on
+              # aarch64-musl; accept both. Not `ldd`: it exits 1 on a non-PIE static
+              # binary, which pipefail turns into a step failure.
+              case "$info" in
+                *"statically linked"*|*"static-pie linked"*) ;;
+                *) echo "not statically linked: $info" >&2; exit 1 ;;
+              esac
               ;;
           esac
           if [ "${{ matrix.run }}" = "true" ]; then
