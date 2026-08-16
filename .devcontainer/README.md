@@ -222,9 +222,11 @@ It scans the pane's foreground process group for a known name; all the host can
 see here is `Code Helper (Plugin)` running the devcontainer CLI. Without a match
 the pane stays `agent=none status=unknown` and the output rules that produce
 idle/working never run — the reported session id alone doesn't change that.
-So `exec` re-execs itself with `argv0` rewritten to `claude`
-(`CommandExt::arg0`) and stays alive as the parent of the container command,
-putting one host-side process named `claude` in the group:
+So `exec` re-execs itself with `argv0` rewritten to the claimed agent's
+canonical name (`CommandExt::arg0`) — the name `<cmd>` resolves to, or
+whatever `--agent <name>` overrides it with — and stays alive as the parent of
+the container command, putting one host-side process with that name in the
+group:
 
 ```text
 zsh -lc make claude
@@ -242,12 +244,13 @@ normally.
 
 Consequences worth knowing:
 
-- **`make shell` claims the pane too** (`exec --agent bash`), so a `claude`
-  typed inside that shell is detected, not just reported. It has to claim up
-  front: herdr only ever sees the *host* side of the pane, and a `claude` started
-  later inside the container changes nothing it can observe. The cost is a pane
-  that reads as `agent=claude` while it's only a shell — `exec bash` without the
-  flag is the honest version if that bothers you.
+- **`make shell` claims the pane too** (`exec --agent claude bash`), so a
+  `claude` typed inside that shell is detected, not just reported. It has to
+  claim up front: herdr only ever sees the *host* side of the pane, and a
+  `claude` started later inside the container changes nothing it can observe.
+  The cost is a pane that reads as `agent=claude` while it's only a shell —
+  `exec bash` without the flag is the honest version if that bothers you, and
+  `--agent <name>` works for any agent herdr recognises, not just claude.
 - **The reported transcript path is a container path.** The hook sends
   `agent_session_path` as `/home/vscode/.claude/projects/…`, which the host
   can't read, so anything herdr derives from the transcript rather than from

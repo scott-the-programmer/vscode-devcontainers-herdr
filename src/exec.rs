@@ -1,8 +1,8 @@
 //! Run a command in this repo's devcontainer as the calling herdr pane's agent.
 //!
 //! ```text
-//! herdr-devcontainer-status exec claude
-//! herdr-devcontainer-status exec bash
+//! herdr-devcontainer-status exec opencode
+//! herdr-devcontainer-status exec --agent opencode bash
 //! ```
 //!
 //! Four things have to line up, and none of them do by default:
@@ -21,8 +21,8 @@
 //!
 //! Kept on the devcontainer CLI rather than a raw `docker exec`: the CLI does
 //! `userEnvProbe: loginInteractiveShell`, so a container shell here has the same
-//! environment as one opened from VS Code, and `exec bash` and `exec claude` stay
-//! on one mechanism.
+//! environment as one opened from VS Code, and every agent stays on one
+//! mechanism whether it's named on the command line or claimed with `--agent`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -36,8 +36,61 @@ use crate::supervise;
 /// Set on the re-exec so the spoofed process doesn't spoof itself again.
 const ARGV0_GUARD: &str = "HERDR_EXEC_ARGV0";
 
-/// The only agent this repo's container runs, and the argv0 herdr matches on.
-const DEFAULT_AGENT: &str = "claude";
+/// Agent names herdr's process-scan detector recognises, canonical label first
+/// in each group. Mirrors `herdr/src/detect/mod.rs`'s alias table — herdr
+/// exposes no runtime query for this list, so it has to be a static copy here,
+/// and it will drift as herdr adds agents. An unrecognised `--agent` name is
+/// still accepted and forwarded verbatim (see `parse_args`), so a new herdr
+/// agent works here without a release.
+const AGENTS: &[&[&str]] = &[
+    &["pi"],
+    &["claude", "claude-code"],
+    &["codex"],
+    &["gemini"],
+    &["cursor", "cursor-agent"],
+    &["devin", "devin-cli"],
+    &["agy", "antigravity", "antigravity-cli"],
+    &["cline"],
+    &["omp"],
+    &["mastracode", "mastra-code"],
+    &["opencode", "opencode2", "open-code"],
+    &["copilot", "github-copilot", "ghcs"],
+    &["kimi", "kimi-code"],
+    &["kiro", "kiro-cli"],
+    &["droid"],
+    &["amp", "amp-local"],
+    &["grok", "grok-build"],
+    &["hermes", "hermes-agent"],
+    &["kilo", "kilo-code"],
+    &["qodercli", "qoderclicn", "qoder", "qodercn"],
+    &["qwen", "qwen-code"],
+    &["maki"],
+];
+
+/// Lowercase, trim, and strip one trailing script/launcher extension — mirrors
+/// herdr's own normalization (`herdr/src/detect/mod.rs`) so this table can't
+/// disagree with the matcher it's feeding.
+fn normalize(name: &str) -> String {
+    let lower = name.trim().to_lowercase();
+    for suffix in [".exe", ".cmd", ".bat", ".ps1", ".js"] {
+        if let Some(stripped) = lower.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    lower
+}
+
+/// The canonical agent label `name` resolves to, if any. `name` may already be
+/// a canonical label, an alias (`cursor-agent`), or carry an extension
+/// (`Codex.exe`) — a leading path is not stripped here; callers that pass a
+/// whole command path extract the basename first (see `claimed_argv0`).
+fn canonical_agent(name: &str) -> Option<&'static str> {
+    let needle = normalize(name);
+    AGENTS
+        .iter()
+        .find(|group| group.contains(&needle.as_str()))
+        .map(|group| group[0])
+}
 
 /// This binary's own version — what a container-side candidate has to report
 /// from `--version` before we'll trust it, and the suffix on the path we
@@ -89,9 +142,15 @@ HERDR_SOCKET_PATH="$sock" exec "$bin" relay "$verb"
 "#;
 
 pub fn run(args: &[String]) -> i32 {
-    let (claim, args) = split_agent_flag(args);
+    let (claim, args) = match parse_args(args) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return 2;
+        }
+    };
     if args.is_empty() {
-        eprintln!("usage: herdr-devcontainer-status exec [--agent] <command> [args...]");
+        eprintln!("usage: herdr-devcontainer-status exec [--agent <name>] <command> [args...]");
         return 2;
     }
 
@@ -122,7 +181,14 @@ pub fn run(args: &[String]) -> i32 {
         return wait(devcontainer(&cli, &root, &[], args));
     };
 
-    spoof_argv0(args, claim);
+    if let Some(name) = claim.as_deref() {
+        if canonical_agent(name).is_none() {
+            eprintln!(
+                "exec: unknown agent {name:?} — claiming it anyway; herdr will ignore it unless it recognises the name"
+            );
+        }
+    }
+    spoof_argv0(args, claim.as_deref());
 
     // Non-fatal, both of them: a missing bridge or relay costs agent state in
     // herdr, not the session. A relay failure still needs *some* socket path
@@ -134,10 +200,10 @@ pub fn run(args: &[String]) -> i32 {
         settings::CONTAINER_SOCKET.to_string()
     });
 
-    // No exec: this process is the pane's `claude` for detection purposes, so it
-    // has to outlive the call. Claude puts the tty in raw mode, so Ctrl-C reaches
-    // it as a keypress rather than a signal to this process group — no signal
-    // plumbing here.
+    // No exec: this process is the pane's claimed agent for detection purposes,
+    // so it has to outlive the call. Interactive agents put the tty in raw
+    // mode, so Ctrl-C reaches them as a keypress rather than a signal to this
+    // process group — no signal plumbing here.
     wait(devcontainer(
         &cli,
         &root,
@@ -151,7 +217,8 @@ pub fn run(args: &[String]) -> i32 {
 /// session over the socket is not enough on its own: without a match here the
 /// pane stays `agent=none status=unknown`, and the output rules that produce
 /// idle/working never run. Everything the host can see in this pane is the
-/// devcontainer CLI under node, so put one process named `claude` in the group.
+/// devcontainer CLI under node, so put one process named after the agent's
+/// canonical label in the group.
 ///
 /// It has to be a re-exec of ourselves rather than a spoofed child process: the
 /// name has to sit on a process that stays alive as the *parent* of the container
@@ -160,7 +227,7 @@ pub fn run(args: &[String]) -> i32 {
 ///
 /// Returns when the spoof doesn't apply; a failed exec is downgraded to a
 /// warning, since an undetected session still beats no session.
-fn spoof_argv0(args: &[String], claim: bool) {
+fn spoof_argv0(args: &[String], claim: Option<&str>) {
     if std::env::var_os(ARGV0_GUARD).is_some() {
         return;
     }
@@ -181,27 +248,51 @@ fn spoof_argv0(args: &[String], claim: bool) {
 
 /// Which argv0 to claim, if any.
 ///
-/// Normally it comes from the command: `exec claude` claims the pane, and
-/// anything else leaves it alone. `--agent` claims it regardless, which is what
-/// an interactive shell needs — herdr only ever sees the *host* side of the pane,
-/// so a `claude` started later inside the container changes nothing it can
-/// observe. The claim has to be in place before the shell is.
-fn claimed_argv0(command: &str, claim: bool) -> Option<&'static str> {
-    if claim {
-        return Some(DEFAULT_AGENT);
+/// Normally it comes from the command: `exec opencode` claims the pane as
+/// `opencode`, and a command that names no recognised agent (`bash`, `npm`, …)
+/// leaves it alone. `--agent <name>` overrides the command entirely, which is
+/// what an interactive shell needs — herdr only ever sees the *host* side of
+/// the pane, so an agent started later inside the container changes nothing it
+/// can observe. The claim has to be in place before the shell is.
+fn claimed_argv0(command: &str, claim: Option<&str>) -> Option<String> {
+    if let Some(name) = claim {
+        return Some(name.to_string());
     }
-    match Path::new(command).file_name()?.to_str()? {
-        "claude" => Some(DEFAULT_AGENT),
-        _ => None,
-    }
+    let file_name = Path::new(command).file_name()?.to_str()?;
+    canonical_agent(file_name).map(str::to_string)
 }
 
-/// Strip a leading `--agent`, which claims the pane whatever we end up running.
-fn split_agent_flag(args: &[String]) -> (bool, &[String]) {
-    match args.split_first() {
-        Some((flag, rest)) if flag == "--agent" => (true, rest),
-        _ => (false, args),
+/// Split a leading `--agent <name>` off the front of `args`, returning the
+/// agent to claim (resolved to its canonical label when recognised, forwarded
+/// verbatim otherwise — see `AGENTS`) and the remaining command. Only a
+/// *leading* `--agent` is recognised, so one meant for the command itself
+/// (`exec claude --agent`) passes through untouched.
+///
+/// `--agent` used to be a bare flag meaning "claim as claude"; the old
+/// `exec --agent bash` form now reads `bash` as the agent name and has no
+/// command left, so it errors instead of silently doing the wrong thing.
+fn parse_args(args: &[String]) -> Result<(Option<String>, &[String]), String> {
+    let Some((flag, rest)) = args.split_first() else {
+        return Ok((None, args));
+    };
+    if flag != "--agent" {
+        return Ok((None, args));
     }
+    let Some((name, command)) = rest.split_first() else {
+        return Err("exec: --agent needs an agent name, e.g. --agent claude bash".to_string());
+    };
+    if command.is_empty() {
+        return Err(
+            "exec: --agent takes an agent name now, and still needs a command\n  \
+             exec --agent claude bash   claims the pane and runs bash\n  \
+             exec bash                  runs it unclaimed"
+                .to_string(),
+        );
+    }
+    let claim = canonical_agent(name)
+        .map(str::to_string)
+        .unwrap_or_else(|| name.clone());
+    Ok((Some(claim), command))
 }
 
 /// The variables the hook needs; it exits 0 on the first one missing. `socket`
@@ -517,38 +608,118 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_claude_claims_the_pane_by_command_name() {
-        assert_eq!(claimed_argv0("claude", false), Some("claude"));
+    fn a_command_that_names_an_agent_claims_the_pane() {
+        assert_eq!(claimed_argv0("claude", None), Some("claude".to_string()));
         assert_eq!(
-            claimed_argv0("/usr/local/bin/claude", false),
-            Some("claude")
+            claimed_argv0("/usr/local/bin/claude", None),
+            Some("claude".to_string())
         );
-        assert_eq!(claimed_argv0("bash", false), None);
-        assert_eq!(claimed_argv0("/bin/zsh", false), None);
-        assert_eq!(claimed_argv0("", false), None);
+        assert_eq!(
+            claimed_argv0("opencode", None),
+            Some("opencode".to_string())
+        );
+        assert_eq!(claimed_argv0("bash", None), None);
+        assert_eq!(claimed_argv0("/bin/zsh", None), None);
+        assert_eq!(claimed_argv0("", None), None);
     }
 
     #[test]
     fn the_agent_flag_claims_the_pane_for_any_command() {
         // What `make shell` needs: the claim is in place before the shell is,
-        // because a `claude` started inside the container is invisible to herdr.
-        assert_eq!(claimed_argv0("bash", true), Some("claude"));
-        assert_eq!(claimed_argv0("/bin/zsh", true), Some("claude"));
+        // because an agent started inside the container is invisible to herdr.
+        assert_eq!(
+            claimed_argv0("bash", Some("opencode")),
+            Some("opencode".to_string())
+        );
+        assert_eq!(
+            claimed_argv0("/bin/zsh", Some("claude")),
+            Some("claude".to_string())
+        );
     }
 
     #[test]
-    fn agent_flag_is_stripped_from_the_container_command() {
+    fn claimed_argv0_resolves_aliases_to_their_canonical_label() {
+        assert_eq!(
+            claimed_argv0("cursor-agent", None),
+            Some("cursor".to_string())
+        );
+        assert_eq!(
+            claimed_argv0("claude-code", None),
+            Some("claude".to_string())
+        );
+        assert_eq!(claimed_argv0("ghcs", None), Some("copilot".to_string()));
+    }
+
+    #[test]
+    fn canonical_agent_strips_one_trailing_extension_and_ignores_case() {
+        assert_eq!(canonical_agent("claude.cmd"), Some("claude"));
+        assert_eq!(canonical_agent("opencode.js"), Some("opencode"));
+        // Only one suffix is stripped, so a double extension still fails to match.
+        assert_eq!(canonical_agent("opencode.js.exe"), None);
+        assert_eq!(canonical_agent("CLAUDE"), Some("claude"));
+        // A leading path isn't stripped here — callers extract the basename first.
+        assert_eq!(canonical_agent("/usr/local/bin/Codex"), None);
+    }
+
+    #[test]
+    fn every_canonical_label_resolves_to_itself_with_no_duplicate_aliases() {
+        let mut seen = std::collections::HashSet::new();
+        for group in AGENTS {
+            assert_eq!(canonical_agent(group[0]), Some(group[0]));
+            for alias in *group {
+                assert!(
+                    seen.insert(*alias),
+                    "duplicate alias across groups: {alias}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_args_claims_a_recognised_or_unknown_agent_name() {
         let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
-        let shell = args(&["--agent", "bash"]);
-        assert_eq!(split_agent_flag(&shell), (true, &shell[1..]));
+        let recognised = args(&["--agent", "opencode", "bash"]);
+        let (claim, command) = parse_args(&recognised).unwrap();
+        assert_eq!(claim.as_deref(), Some("opencode"));
+        assert_eq!(command, &recognised[2..]);
+
+        // Forwarded verbatim so a herdr agent this table doesn't know about yet
+        // still works; `run` is what warns about it.
+        let unknown = args(&["--agent", "hypothetical", "bash"]);
+        let (claim, _) = parse_args(&unknown).unwrap();
+        assert_eq!(claim.as_deref(), Some("hypothetical"));
+
+        // An alias resolves to its canonical label.
+        let alias = args(&["--agent", "cursor-agent", "bash"]);
+        let (claim, _) = parse_args(&alias).unwrap();
+        assert_eq!(claim.as_deref(), Some("cursor"));
+    }
+
+    #[test]
+    fn parse_args_leaves_a_command_with_no_leading_agent_flag_untouched() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
         let session = args(&["claude", "--continue"]);
-        assert_eq!(split_agent_flag(&session), (false, &session[..]));
+        let (claim, command) = parse_args(&session).unwrap();
+        assert_eq!(claim, None);
+        assert_eq!(command, &session[..]);
 
         // Only leading, so it can't swallow a flag meant for the command itself.
         let passthrough = args(&["claude", "--agent"]);
-        assert_eq!(split_agent_flag(&passthrough), (false, &passthrough[..]));
+        let (claim, command) = parse_args(&passthrough).unwrap();
+        assert_eq!(claim, None);
+        assert_eq!(command, &passthrough[..]);
+    }
+
+    #[test]
+    fn parse_args_rejects_agent_flag_with_no_name_or_no_command() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert!(parse_args(&args(&["--agent"])).is_err());
+        // The old bare-flag form: `--agent bash` now reads "bash" as the agent
+        // name and has no command left, so it must error, not silently claim.
+        assert!(parse_args(&args(&["--agent", "bash"])).is_err());
     }
 
     #[test]

@@ -93,9 +93,12 @@ already running, `docker cp`s a matching relay binary into the container's `/tmp
 it's needed, and forwards your pane's herdr identity in — all with nothing to configure. Ctrl-C
 behaves normally; the pane just stops being a tracked agent when the command exits.
 
-Use `exec --agent bash` instead of `exec claude` to open a claiming shell — useful if you want
-to `claude` from inside it yourself later, since herdr only ever sees the host side of the pane
-and can't detect an agent started *after* the shell already began.
+`exec <cmd>` claims the pane for whichever agent `<cmd>` names — `exec opencode` claims it as
+`opencode`, and a command that names no agent herdr recognises (`bash`, `npm`, …) leaves the
+pane unclaimed. Use `--agent <name>` to override that, which is what an interactive shell needs:
+`exec --agent claude bash` opens a claiming shell — useful if you want to run `claude` (or
+`--agent opencode` and then `opencode`) from inside it yourself later, since herdr only ever sees
+the host side of the pane and can't detect an agent started *after* the shell already began.
 
 ### Put it on your `PATH`
 
@@ -118,9 +121,9 @@ unset _herdr_devstatus_bin
 With that on `PATH`, add a couple of aliases for the commands you'll actually type:
 
 ```sh
-alias hdc='herdr-devcontainer-status exec claude'         # run claude, tracked by herdr
-alias hds='herdr-devcontainer-status exec --agent bash'   # a claiming shell
-alias hdr='herdr-devcontainer-status refresh'              # status as JSON, for this pane
+alias hdc='herdr-devcontainer-status exec claude'                # run claude, tracked by herdr
+alias hds='herdr-devcontainer-status exec --agent claude bash'   # a claiming shell
+alias hdr='herdr-devcontainer-status refresh'                    # status as JSON, for this pane
 ```
 
 `hdc` from any herdr pane in a project with a `.devcontainer/` is the everyday version of step 6.

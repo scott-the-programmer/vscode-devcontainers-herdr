@@ -27,8 +27,10 @@ const USAGE: &str = "\
 usage: herdr-devcontainer-status <command>
 
   refresh | hook [--all]              print this pane's devcontainer status as JSON
-  exec [--agent] <command> [args...]  run a command in the container as this pane's agent
-                                      (--agent claims the pane whatever it runs)
+  exec [--agent <name>] <command> [args...]
+                                       run a command in the container as this pane's agent
+                                       (a recognised agent name in <command> claims the
+                                       pane; --agent <name> overrides it for any command)
   bridge  <start|stop|status|serve>   host: publish herdr's socket on the loopback port
   relay   <start|stop|status|serve>   container: present that port as a unix socket
           [--container]               ... drive the container's relay from the host

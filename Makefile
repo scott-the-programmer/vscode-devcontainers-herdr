@@ -78,7 +78,7 @@ shell: $(BIN) ## Shell into the running container (as a claude agent pane)
 	# --agent: herdr only sees the host side of a pane, so a `claude` started
 	# later inside this shell can't be detected unless the claim is already in
 	# place. Costs a pane that reads as agent=claude while it's only a shell.
-	@$(BIN) exec --agent bash
+	@$(BIN) exec --agent claude bash
 
 relay: $(BIN) ## Start/inspect both ends of the herdr agent-state bridge
 	@$(BIN) bridge start

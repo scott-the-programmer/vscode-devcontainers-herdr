@@ -18,7 +18,7 @@ One host binary with three jobs:
 | subcommand | runs on | what it does |
 | --- | --- | --- |
 | `refresh` / `hook` | host | prints the pane project's devcontainer state as JSON (`running` / `stopped` / `none`) and reports it to herdr as pane/workspace metadata |
-| `exec [--agent] <cmd>` | host | runs `<cmd>` in the container, forwards the pane's herdr identity in, and re-execs itself as `argv0=claude` so herdr matches the pane |
+| `exec [--agent <name>] <cmd>` | host | runs `<cmd>` in the container, forwards the pane's herdr identity in, and re-execs itself with `argv0` set to the claimed agent's name (from `<cmd>`, or overridden by `--agent`) so herdr matches the pane |
 | `bridge` / `relay` | host / container | a loopback TCP hop that presents herdr's control socket inside the container |
 
 `exec` works against **any** project's devcontainer, not just checkouts of this crate: it
