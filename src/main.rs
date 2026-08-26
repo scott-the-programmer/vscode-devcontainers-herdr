@@ -92,7 +92,8 @@ fn print_status(workspace_wide: bool) -> i32 {
 /// the other verbs supervise it.
 fn bridge(args: &[String]) -> i32 {
     let port = settings::port();
-    let ready = || forward::tcp_answers(port);
+    let bind = settings::bridge_bind();
+    let ready = || forward::tcp_answers(&bind, port);
     match verb(args) {
         "start" => match herdr_socket() {
             Ok(_) => say(supervise::bridge().start(&ready)),
@@ -104,7 +105,7 @@ fn bridge(args: &[String]) -> i32 {
         }
         "status" => say(supervise::bridge().status(&ready)),
         "serve" => match herdr_socket() {
-            Ok(socket) => serve_bridge(port, &socket),
+            Ok(socket) => serve_bridge(&bind, port, &socket),
             Err(msg) => say(Err(msg)),
         },
         other => {
@@ -114,10 +115,10 @@ fn bridge(args: &[String]) -> i32 {
     }
 }
 
-fn serve_bridge(port: u16, socket: &Path) -> i32 {
-    match forward::bind_tcp("127.0.0.1", port) {
+fn serve_bridge(bind: &str, port: u16, socket: &Path) -> i32 {
+    match forward::bind_tcp(bind, port) {
         Ok(listener) => {
-            println!("bridge: 127.0.0.1:{port} -> {}", socket.display());
+            println!("bridge: {bind}:{port} -> {}", socket.display());
             if let Err(e) = forward::serve_tcp_to_unix(listener, socket) {
                 eprintln!("bridge: {e}");
                 return 1;
@@ -125,7 +126,7 @@ fn serve_bridge(port: u16, socket: &Path) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("bridge: 127.0.0.1:{port}: {e}");
+            eprintln!("bridge: {bind}:{port}: {e}");
             1
         }
     }

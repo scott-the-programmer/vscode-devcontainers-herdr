@@ -194,7 +194,10 @@ pub fn run(args: &[String]) -> i32 {
     // herdr, not the session. A relay failure still needs *some* socket path
     // to advertise, so the hook has a consistent (if unreachable) target to
     // fail against rather than none at all.
-    report(supervise::bridge().start(&|| crate::forward::tcp_answers(settings::port())));
+    report(
+        supervise::bridge()
+            .start(&|| crate::forward::tcp_answers(&settings::bridge_bind(), settings::port())),
+    );
     let socket = container_relay(&cli, &root, "start").unwrap_or_else(|msg| {
         eprintln!("{msg}");
         settings::CONTAINER_SOCKET.to_string()
