@@ -1,78 +1,90 @@
 # herdr-devcontainer-status
 
-A herdr plugin that makes VS Code devcontainers legible to herdr — and
-makes an agent session running *inside* one show up as a normal herdr agent.
+A [herdr](https://herdr.dev) plugin that makes VS Code devcontainers visible to herdr, and
+lets an agent (Claude Code, OpenCode, etc.) running *inside* one show up as a normal,
+tracked herdr agent, the same as one running on the host.
 
-## The problem
-
-herdr shows panes, Docker knows about containers, and nothing currently connects the two. This relay bridges the gap
-
-Coding harnesses such as Claude Code, OpenCode and Pi do not show up in herdr by default when
-they run inside one. This binary attempts to simplify the process by starting a session with a
-thin relay to feed back agent information to herdr.
-
-## What it does
-
-One host binary with three jobs:
-
-| subcommand | runs on | what it does |
-| --- | --- | --- |
-| `refresh` / `hook` | host | prints the pane project's devcontainer state as JSON (`running` / `stopped` / `none`) and reports it to herdr as pane/workspace metadata |
-| `exec [--agent <name>] <cmd>` | host | runs `<cmd>` in the container, forwards the pane's herdr identity in, and re-execs itself with `argv0` set to the claimed agent's name (from `<cmd>`, or overridden by `--agent`) so herdr matches the pane |
-| `bridge` / `relay` | host / container | a loopback TCP hop that presents herdr's control socket inside the container |
-
-`exec` works against **any** project's devcontainer, not just checkouts of this crate: it
-`docker cp`s a small statically-linked (musl) copy of this same binary into the target
-container's `/tmp` the first time it's needed, so agent-state reporting doesn't depend on that
-project having a Rust toolchain, or being this crate at all. Nothing to configure — see
-[Contributing](#contributing) if you want to see it work, or `.devcontainer/README.md` for how
-the two ends of the relay fit together.
-
-## Requirements
-
-- [Docker](https://docs.docker.com/get-started/get-docker/)
-- [`devcontainer` CLI](https://github.com/devcontainers/cli) — `npm i -g @devcontainers/cli`
-- [Rust](https://rustup.rs) — only if there's no prebuilt binary for your platform (see below), or
-  you're building from a checkout
-
-## Getting started
+## Quick start
 
 ```sh
 herdr plugin install scott-the-programmer/vscode-devcontainers-herdr
 ```
 
-`herdr plugin install` clones the repo and runs `./build.sh`, which downloads the release binary
-matching that checkout's version for your platform — macOS and Linux, x86_64 and arm64 — verifies
-it against the release's `SHA256SUMS`, and installs it. If no prebuilt binary covers your
-platform, or the download fails, it falls back to `cargo build` (needs Rust). `SHA256SUMS` is an
-integrity check, not provenance; releases also carry a
-[build provenance attestation](https://github.com/scott-the-programmer/vscode-devcontainers-herdr/attestations),
-which you can verify out of band with `gh attestation verify --repo
-scott-the-programmer/vscode-devcontainers-herdr <tarball>`.
-
-Then open a herdr pane in any project with a `.devcontainer/`. herdr fires the plugin
-automatically on `pane.created`/`pane.focused`/`workspace.focused`, so the pane's devcontainer
-state (`running`/`stopped`/`none`) shows up as a `$devcontainer` metadata token with no command
-to run — add it to a sidebar row to see it:
+That's it for installation. Nothing to configure. Now open a herdr pane in any project
+that has a `.devcontainer/`. herdr detects the container's state (`running` / `stopped` /
+`none`) automatically and reports it back, ready to show in the sidebar once you add the
+`$devcontainer` token to a row:
 
 ```toml
 # ~/.config/herdr/config.toml
 ui.sidebar.agents.rows = [["state_icon", "workspace", "tab"], ["agent", "$devcontainer"]]
 ```
 
-`herdr-devcontainer-status exec claude` runs an agent inside that container that herdr tracks
-like a host-side one.
+To run an agent inside that container while herdr still tracks the pane, use `exec` from
+that same pane:
+
+```sh
+herdr-devcontainer-status exec claude
+```
+
+This starts `claude` inside the devcontainer, wired up so herdr sees it exactly like an
+agent on the host, with the same idle/working/done status.
+
+For the full walkthrough (finding the binary's install path, aliases worth adding,
+troubleshooting), see [`USAGE.md`](USAGE.md).
+
+## Why this exists
+
+herdr shows panes and Docker shows containers, but nothing connects the two by default.
+An agent running inside a devcontainer is invisible to herdr. This plugin fixes that: it
+reports the container's status and tracks agent sessions running inside it.
+
+## What it does
+
+One host binary, three jobs:
+
+| subcommand | runs on | what it does |
+| --- | --- | --- |
+| `refresh` / `hook` | host | detects the pane project's devcontainer state and reports it to herdr |
+| `exec [--agent <name>] <cmd>` | host | runs `<cmd>` inside the container, carrying the pane's herdr identity in so herdr tracks it |
+| `bridge` / `relay` | host / container | the plumbing that lets the container side talk back to herdr's control socket on the host |
+
+`exec` works against **any** project's devcontainer, not just checkouts of this repo. It
+pushes a small statically-linked (musl) copy of itself into the target container the first
+time it's needed, so nothing needs to be installed there ahead of time, and the target
+project doesn't need a Rust toolchain or any relation to this crate at all.
+
+See [`.devcontainer/README.md`](.devcontainer/README.md) if you want the internals of how
+the two ends of the relay fit together.
+
+## Requirements
+
+- [Docker](https://docs.docker.com/get-started/get-docker/), running
+- The [`devcontainer` CLI](https://github.com/devcontainers/cli): `npm i -g @devcontainers/cli`
+- [Rust](https://rustup.rs), only needed if there's no prebuilt binary for your platform
+  (macOS/Linux, x86_64/arm64), or you're building from a checkout
+
+## How installation works
+
+`herdr plugin install` clones this repo and runs `./build.sh`, which downloads the release
+binary matching that checkout's version for your platform, verifies it against the
+release's `SHA256SUMS`, and installs it. If no prebuilt binary covers your platform, or the
+download fails, it falls back to `cargo build` (needs Rust). `SHA256SUMS` is an integrity
+check, not provenance; releases also carry a
+[build provenance attestation](https://github.com/scott-the-programmer/vscode-devcontainers-herdr/attestations),
+verifiable out of band with
+`gh attestation verify --repo scott-the-programmer/vscode-devcontainers-herdr <tarball>`.
 
 ## Contributing
 
-The binary always runs on the **host** — never build or run it inside the container.
+The binary always runs on the **host**. Never build or run it inside the container.
 
 ```sh
 ./build.sh --source            # compile to ./bin/herdr-devcontainer-status (what `make build` runs)
 herdr plugin link "$(pwd)"     # use this checkout instead of an installed copy
 ```
 
-`./build.sh` with no flags tries a prebuilt download first, same as `herdr plugin install` —
+`./build.sh` with no flags tries a prebuilt download first, same as `herdr plugin install`.
 `HERDR_PLUGIN_BUILD=prebuilt ./build.sh` is useful for debugging just that path.
 
 This repo carries a `.devcontainer/` of its own, so it doubles as the test fixture. From a
@@ -87,8 +99,9 @@ make test      # cargo test
 ```
 
 `make help` lists the rest (`rebuild`, `reshell`, `relay`, `clean`, `e2e`, …), and
-`.devcontainer/README.md` covers the container in depth — credential seeding, the bridge/relay
-design, and the security tradeoffs of mounting host credentials into a container.
+[`.devcontainer/README.md`](.devcontainer/README.md) covers the container in depth:
+credential seeding, the bridge/relay design, and the security tradeoffs of mounting host
+credentials into a container.
 
 Maintainers cutting a release should see [`docs/RELEASING.md`](docs/RELEASING.md).
 
