@@ -21,13 +21,17 @@ use crate::settings;
 /// How long to wait for a freshly spawned forwarder to answer, in 100ms steps.
 const READY_STEPS: u32 = 20;
 
-/// The host end: `127.0.0.1:<port>` -> herdr's unix socket.
+/// The host end: `<bind>:<port>` -> herdr's unix socket.
 pub fn bridge() -> Daemon {
     let port = settings::port();
     let run = settings::runtime_dir();
     Daemon {
         label: "bridge",
-        endpoint: format!("127.0.0.1:{port} -> {}", settings::host_socket().display()),
+        endpoint: format!(
+            "{}:{port} -> {}",
+            settings::bridge_bind(),
+            settings::host_socket().display()
+        ),
         pidfile: run.join(format!("herdr-tcp-bridge-{port}.pid")),
         log: run.join(format!("herdr-tcp-bridge-{port}.log")),
         serve_args: vec!["bridge".into(), "serve".into()],

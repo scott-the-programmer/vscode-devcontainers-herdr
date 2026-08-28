@@ -15,12 +15,25 @@
 //! host:       127.0.0.1:47100          ->  ~/.config/herdr/herdr.sock   (bridge)
 //! ```
 //!
-//! The host end binds loopback only — Docker Desktop forwards
+//! The host end binds loopback by default — Docker Desktop forwards
 //! `host.docker.internal` to the host's `127.0.0.1` — so the herdr control
 //! socket never reaches the LAN.
+//!
+//! Native Linux Docker provides neither half of that arrangement. There is no
+//! `host.docker.internal` unless the container was started with
+//! `--add-host=host.docker.internal:host-gateway`, and a listener bound to
+//! `127.0.0.1` does not accept connections arriving over the docker bridge —
+//! so fixing only the name turns a resolution failure into a refused
+//! connection. `HERDR_RELAY_HOST` already moves the container end;
+//! `HERDR_BRIDGE_BIND` moves the host end. Both default to today's behaviour.
+//!
+//! Widening the bind is opt-in because the herdr control socket is not
+//! authenticated: whatever reaches the port can drive herdr. Binding the docker
+//! bridge address exposes it to every container on that bridge. That is a real
+//! trade, and it belongs to the person making it rather than to a default.
 
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -139,7 +152,7 @@ pub fn serve_unix_to_tcp(listener: UnixListener, host: &str, port: u16) -> io::R
 }
 
 /// Bind the bridge port. Loopback by default and deliberately — see the module
-/// docs before widening `addr`.
+/// docs and `settings::bridge_bind` before widening `addr`.
 pub fn bind_tcp(addr: &str, port: u16) -> io::Result<TcpListener> {
     TcpListener::bind((addr, port))
 }
@@ -160,13 +173,24 @@ pub fn bind_unix(path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// True if anything accepts a connection on the bridge port.
+/// True if anything accepts a connection on the bridge port at `addr`.
 ///
 /// Liveness is probed by connecting rather than by reading a pidfile: a pid can
 /// be recycled, and a bridge started by another pane never wrote our pidfile.
-pub fn tcp_answers(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+///
+/// The probe has to target the address the bridge actually bound. A bridge on
+/// the docker bridge address does not answer on loopback, and probing the wrong
+/// one makes `start` believe it failed and spawn another forwarder on every
+/// exec.
+pub fn tcp_answers(addr: &str, port: u16) -> bool {
+    match (addr, port).to_socket_addrs() {
+        Ok(mut addrs) => {
+            addrs.any(|a| TcpStream::connect_timeout(&a, Duration::from_millis(300)).is_ok())
+        }
+        // An unresolvable bind address answers nothing, which is the same
+        // observable state as a bridge that is not running.
+        Err(_) => false,
+    }
 }
 
 /// True if anything accepts a connection on the relay's unix socket.
@@ -303,9 +327,24 @@ mod tests {
 
         let listener = bind_tcp("127.0.0.1", 0).unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert!(tcp_answers(port));
+        assert!(tcp_answers("127.0.0.1", port));
         drop(listener);
-        assert!(!tcp_answers(port));
+        assert!(!tcp_answers("127.0.0.1", port));
+    }
+
+    #[test]
+    fn a_bridge_is_not_found_on_an_address_it_did_not_bind() {
+        // The regression behind HERDR_BRIDGE_BIND: probing loopback for a
+        // bridge bound elsewhere reports "not running" forever.
+        let listener = bind_tcp("127.0.0.1", 0).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(tcp_answers("127.0.0.1", port));
+        assert!(!tcp_answers("192.0.2.1", port)); // TEST-NET-1, RFC 5737
+    }
+
+    #[test]
+    fn an_unresolvable_address_is_false_rather_than_a_panic() {
+        assert!(!tcp_answers("no-such-host.invalid", 47100)); // RFC 2606
     }
 
     #[test]

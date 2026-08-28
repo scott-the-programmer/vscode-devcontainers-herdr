@@ -75,6 +75,42 @@ check, not provenance; releases also carry a
 verifiable out of band with
 `gh attestation verify --repo scott-the-programmer/vscode-devcontainers-herdr <tarball>`.
 
+## Native Linux Docker
+
+The defaults assume Docker Desktop, which forwards `host.docker.internal` to the
+host's loopback. Plain Linux Docker does neither, so point both ends at the
+docker bridge:
+
+```sh
+# in the herdr pane, or your shell profile
+export HERDR_RELAY_HOST=172.17.0.1    # exec forwards this into the container
+export HERDR_BRIDGE_BIND=172.17.0.1   # the host bridge listens here too
+```
+
+Use your own docker bridge address — `ip -4 addr show docker0` — which is also
+what `--add-host=host.docker.internal:host-gateway` resolves to, if you would
+rather keep the name and set only `HERDR_BRIDGE_BIND`.
+
+Set both or neither. Moving only the container end leaves the bridge on
+loopback, which turns a name-resolution failure into a refused connection, and
+moving only the host end leaves the container dialling a name that does not
+resolve. `~/.herdr/relay.log` inside the container names which one you have:
+
+```text
+relay: host.docker.internal:47100: failed to lookup address information   # no name
+relay: 172.17.0.1:47100: Connection refused                               # bridge still on loopback
+```
+
+`HERDR_BRIDGE_BIND` widens who can reach herdr's control socket, and that socket
+is not authenticated — on the docker bridge address, every container on that
+bridge can reach it. That is why it is opt-in and why the default stays on
+loopback.
+
+Note that none of this affects whether the agent *appears* in herdr. Pane
+identity is passed inward as environment at exec time and needs no socket, so a
+broken relay looks like a working session whose state is screen-detected rather
+than reported. That is the failure this is easy to miss.
+
 ## Contributing
 
 The binary always runs on the **host**. Never build or run it inside the container.
