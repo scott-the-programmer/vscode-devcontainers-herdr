@@ -27,7 +27,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::docker;
 use crate::settings;
@@ -467,10 +467,15 @@ fn parse_bootstrap_output(stdout: &str) -> (Option<String>, Option<String>) {
     (socket, need)
 }
 
-/// `docker cp` a bundled musl binary matching `arch` into the container's
-/// `/tmp`, then mark it executable. `/tmp` is deliberately not persisted: a
-/// restarted container needs a restarted relay anyway, and the next `exec`
-/// re-pushes automatically via `probe_relay` above.
+/// Push a bundled musl binary matching `arch` into the container's `/tmp` by
+/// streaming it over `docker exec`'s stdin, then mark it executable. `/tmp` is
+/// deliberately not persisted: a restarted container needs a restarted relay
+/// anyway, and the next `exec` re-pushes automatically via `probe_relay` above.
+///
+/// Deliberately not `docker cp`: it fails with `no such device or address` on
+/// containers that bind-mount a live Unix socket (e.g. docker-outside-of-docker's
+/// `docker.sock`), since its tar machinery walks the whole changed-file set.
+/// Streaming over `exec -i` stdin avoids that.
 fn push_relay_binary(root: &Path, arch: &str) -> Result<(), String> {
     let triple = musl_triple(arch)
         .ok_or_else(|| format!("exec: no relay binary published for container arch {arch}"))?;
@@ -478,23 +483,24 @@ fn push_relay_binary(root: &Path, arch: &str) -> Result<(), String> {
     let container = container_name(root)?;
     let dest = format!("/tmp/herdr-devcontainer-status-{VERSION}");
 
-    let cp = Command::new("docker")
-        .arg("cp")
-        .arg(&local)
-        .arg(format!("{container}:{dest}"))
-        .status()
-        .map_err(|e| format!("exec: docker cp: {e}"))?;
-    if !cp.success() {
-        return Err(format!("exec: docker cp to {container} failed"));
-    }
+    let file = std::fs::File::open(&local)
+        .map_err(|e| format!("exec: cannot open {}: {e}", local.display()))?;
 
-    let chmod = Command::new("docker")
-        .args(["exec", &container, "chmod", "+x", &dest])
+    let write = Command::new("docker")
+        .args([
+            "exec",
+            "-i",
+            &container,
+            "sh",
+            "-c",
+            &format!("cat > {dest} && chmod +x {dest}"),
+        ])
+        .stdin(Stdio::from(file))
         .status()
-        .map_err(|e| format!("exec: docker exec chmod: {e}"))?;
-    if !chmod.success() {
+        .map_err(|e| format!("exec: docker exec: {e}"))?;
+    if !write.success() {
         return Err(format!(
-            "exec: could not mark {dest} executable in {container}"
+            "exec: pushing the relay binary to {container} failed"
         ));
     }
     Ok(())
