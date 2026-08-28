@@ -1,6 +1,6 @@
 [package]
 name = "herdr-devcontainer-status"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "herdr plugin: shows the VS Code devcontainer state of each pane's project"
 license = "MIT"
