@@ -1,8 +1,8 @@
 # herdr-devcontainer-status
 
-A [herdr](https://herdr.dev) plugin that makes VS Code devcontainers visible to herdr —
-and lets an agent (Claude Code, OpenCode, etc.) running *inside* one show up as a normal
-tracked herdr agent, just like it would on the host.
+A [herdr](https://herdr.dev) plugin that makes VS Code devcontainers visible to herdr, and
+lets an agent (Claude Code, OpenCode, etc.) running *inside* one show up as a normal,
+tracked herdr agent, the same as one running on the host.
 
 ## Quick start
 
@@ -10,7 +10,7 @@ tracked herdr agent, just like it would on the host.
 herdr plugin install scott-the-programmer/vscode-devcontainers-herdr
 ```
 
-That's it for installation — nothing to configure. Now open a herdr pane in any project
+That's it for installation. Nothing to configure. Now open a herdr pane in any project
 that has a `.devcontainer/`. herdr detects the container's state (`running` / `stopped` /
 `none`) automatically and reports it back, ready to show in the sidebar once you add the
 `$devcontainer` token to a row:
@@ -28,7 +28,7 @@ herdr-devcontainer-status exec claude
 ```
 
 This starts `claude` inside the devcontainer, wired up so herdr sees it exactly like an
-agent running on the host — idle/working/done status and all.
+agent on the host, with the same idle/working/done status.
 
 For the full walkthrough (finding the binary's install path, aliases worth adding,
 troubleshooting), see [`USAGE.md`](USAGE.md).
@@ -36,8 +36,8 @@ troubleshooting), see [`USAGE.md`](USAGE.md).
 ## Why this exists
 
 herdr shows panes and Docker shows containers, but nothing connects the two by default.
-An agent running inside a devcontainer is invisible to herdr — this plugin bridges that
-gap, both for status reporting and for tracking an agent session running in the container.
+An agent running inside a devcontainer is invisible to herdr. This plugin fixes that: it
+reports the container's status and tracks agent sessions running inside it.
 
 ## What it does
 
@@ -49,7 +49,7 @@ One host binary, three jobs:
 | `exec [--agent <name>] <cmd>` | host | runs `<cmd>` inside the container, carrying the pane's herdr identity in so herdr tracks it |
 | `bridge` / `relay` | host / container | the plumbing that lets the container side talk back to herdr's control socket on the host |
 
-`exec` works against **any** project's devcontainer, not just checkouts of this repo — it
+`exec` works against **any** project's devcontainer, not just checkouts of this repo. It
 pushes a small statically-linked (musl) copy of itself into the target container the first
 time it's needed, so nothing needs to be installed there ahead of time, and the target
 project doesn't need a Rust toolchain or any relation to this crate at all.
@@ -61,7 +61,7 @@ the two ends of the relay fit together.
 
 - [Docker](https://docs.docker.com/get-started/get-docker/), running
 - The [`devcontainer` CLI](https://github.com/devcontainers/cli): `npm i -g @devcontainers/cli`
-- [Rust](https://rustup.rs) — only needed if there's no prebuilt binary for your platform
+- [Rust](https://rustup.rs), only needed if there's no prebuilt binary for your platform
   (macOS/Linux, x86_64/arm64), or you're building from a checkout
 
 ## How installation works
@@ -77,14 +77,14 @@ verifiable out of band with
 
 ## Contributing
 
-The binary always runs on the **host** — never build or run it inside the container.
+The binary always runs on the **host**. Never build or run it inside the container.
 
 ```sh
 ./build.sh --source            # compile to ./bin/herdr-devcontainer-status (what `make build` runs)
 herdr plugin link "$(pwd)"     # use this checkout instead of an installed copy
 ```
 
-`./build.sh` with no flags tries a prebuilt download first, same as `herdr plugin install` —
+`./build.sh` with no flags tries a prebuilt download first, same as `herdr plugin install`.
 `HERDR_PLUGIN_BUILD=prebuilt ./build.sh` is useful for debugging just that path.
 
 This repo carries a `.devcontainer/` of its own, so it doubles as the test fixture. From a
@@ -99,7 +99,7 @@ make test      # cargo test
 ```
 
 `make help` lists the rest (`rebuild`, `reshell`, `relay`, `clean`, `e2e`, …), and
-[`.devcontainer/README.md`](.devcontainer/README.md) covers the container in depth —
+[`.devcontainer/README.md`](.devcontainer/README.md) covers the container in depth:
 credential seeding, the bridge/relay design, and the security tradeoffs of mounting host
 credentials into a container.
 
