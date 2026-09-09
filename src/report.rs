@@ -75,8 +75,23 @@ fn queried_cwd() -> Option<PathBuf> {
     if !out.status.success() {
         return None;
     }
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    cwd_field(Some(&value))
+    parse_pane_get_cwd(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pull the cwd out of a `herdr pane get` response.
+///
+/// herdr answers CLI calls in an envelope — `{"id":…,"result":{"pane":{…}}}`
+/// as of 0.8.2 — so the fields sit two levels down, not at the top where a
+/// bare `cwd_field` looks. Unwrap `result`, then the same pane nestings
+/// `parse_context_cwd` walks, and only then try the value itself, so a flatter
+/// shape from another herdr version still resolves.
+fn parse_pane_get_cwd(raw: &str) -> Option<PathBuf> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let inner = value.get("result").unwrap_or(&value);
+    ["pane", "focused_pane"]
+        .into_iter()
+        .find_map(|key| cwd_field(inner.get(key)))
+        .or_else(|| cwd_field(Some(inner)))
 }
 
 /// Push `status` onto the pane as display-only metadata — a `$devcontainer`
@@ -146,6 +161,32 @@ mod tests {
     fn falls_back_to_the_workspace_when_there_is_no_pane() {
         let raw = r#"{"workspace": {"cwd": "/p/api"}}"#;
         assert_eq!(parse_context_cwd(raw), Some(PathBuf::from("/p/api")));
+    }
+
+    #[test]
+    fn parses_cwd_from_herdr_pane_get_envelope() {
+        // Verbatim shape of `herdr pane get w1:p9` on 0.8.2, trimmed.
+        let raw = r#"{"id":"cli:pane:get","result":{"pane":{"cwd":"/p","foreground_cwd":"/p/api","pane_id":"w1:p9"},"type":"pane_info"}}"#;
+        assert_eq!(parse_pane_get_cwd(raw), Some(PathBuf::from("/p/api")));
+    }
+
+    #[test]
+    fn parses_cwd_from_an_unwrapped_pane_get_response() {
+        assert_eq!(
+            parse_pane_get_cwd(r#"{"cwd": "/p/api"}"#),
+            Some(PathBuf::from("/p/api"))
+        );
+        assert_eq!(
+            parse_pane_get_cwd(r#"{"pane": {"cwd": "/p/api"}}"#),
+            Some(PathBuf::from("/p/api"))
+        );
+    }
+
+    #[test]
+    fn pane_get_gives_up_cleanly_on_unrecognised_shapes() {
+        assert_eq!(parse_pane_get_cwd(r#"{"result":{"type":"pane_info"}}"#), None);
+        assert_eq!(parse_pane_get_cwd("not json"), None);
+        assert_eq!(parse_pane_get_cwd(""), None);
     }
 
     #[test]
