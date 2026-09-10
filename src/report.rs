@@ -184,7 +184,10 @@ mod tests {
 
     #[test]
     fn pane_get_gives_up_cleanly_on_unrecognised_shapes() {
-        assert_eq!(parse_pane_get_cwd(r#"{"result":{"type":"pane_info"}}"#), None);
+        assert_eq!(
+            parse_pane_get_cwd(r#"{"result":{"type":"pane_info"}}"#),
+            None
+        );
         assert_eq!(parse_pane_get_cwd("not json"), None);
         assert_eq!(parse_pane_get_cwd(""), None);
     }
