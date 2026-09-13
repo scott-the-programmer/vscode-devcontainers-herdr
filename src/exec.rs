@@ -317,8 +317,39 @@ fn devcontainer(
     env: &[(&'static str, String)],
     command: &[String],
 ) -> Command {
+    let target = docker::list()
+        .ok()
+        .and_then(|containers| docker::container_for(&containers, root).cloned());
+    devcontainer_for_target(cli, root, env, command, target.as_ref())
+}
+
+fn devcontainer_for_target(
+    cli: &Path,
+    root: &Path,
+    env: &[(&'static str, String)],
+    command: &[String],
+    target: Option<&docker::Container>,
+) -> Command {
     let mut cmd = Command::new(cli);
-    cmd.arg("exec").arg("--workspace-folder").arg(root);
+    let root = docker::normalize_wsl_path(&root.to_string_lossy());
+    cmd.arg("exec");
+    if let Some(container) = target {
+        cmd.arg("--container-id")
+            .arg(&container.id)
+            .arg("--workspace-folder")
+            .arg(&root);
+    } else {
+        cmd.arg("--workspace-folder").arg(&root);
+    }
+    if let Some(bin) = cli.parent() {
+        let mut paths = vec![bin.to_path_buf()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        if let Ok(path) = std::env::join_paths(paths) {
+            cmd.env("PATH", path);
+        }
+    }
     for (key, value) in env {
         cmd.arg("--remote-env").arg(format!("{key}={value}"));
     }
@@ -579,6 +610,7 @@ fn workspace_root() -> Option<PathBuf> {
     let cwd = std::env::var_os("HERDR_PANE_CWD")
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
+    let cwd = PathBuf::from(docker::normalize_wsl_path(&cwd.to_string_lossy()));
     crate::discover::find(&cwd).map(|d| d.project_root)
 }
 
@@ -594,12 +626,34 @@ fn resolve_cli() -> Option<PathBuf> {
 /// Where `npm install -g` and homebrew put it. `~/.local/bin/devcontainer` is the
 /// one on this host.
 fn cli_candidates(home: &Path) -> Vec<PathBuf> {
-    vec![
+    let mut candidates = vec![
         home.join(".local/bin/devcontainer"),
         home.join(".npm-global/bin/devcontainer"),
         PathBuf::from("/opt/homebrew/bin/devcontainer"),
         PathBuf::from("/usr/local/bin/devcontainer"),
-    ]
+    ];
+    if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+        let mut nvm: Vec<_> = entries
+            .flatten()
+            .map(|entry| entry.path().join("bin/devcontainer"))
+            .collect();
+        nvm.sort_by_key(|path| nvm_version_key(path));
+        nvm.reverse();
+        candidates.extend(nvm);
+    }
+    candidates
+}
+
+fn nvm_version_key(path: &Path) -> Vec<u32> {
+    path.parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|version| version.to_str())
+        .unwrap_or_default()
+        .trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0))
+        .collect()
 }
 
 fn which_in(name: &str, dirs: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
@@ -803,6 +857,60 @@ mod tests {
         let c = cli_candidates(Path::new("/Users/x"));
         assert!(c.iter().all(|p| p.is_absolute()));
         assert!(c.contains(&PathBuf::from("/Users/x/.local/bin/devcontainer")));
+    }
+
+    #[test]
+    fn cli_candidates_prefer_newest_numeric_nvm_version() {
+        let home = tempfile::tempdir().unwrap();
+        let v9 = home.path().join(".nvm/versions/node/v9.9.9/bin");
+        let v24 = home.path().join(".nvm/versions/node/v24.9.0/bin");
+        std::fs::create_dir_all(&v9).unwrap();
+        std::fs::create_dir_all(&v24).unwrap();
+        let nvm: Vec<_> = cli_candidates(home.path())
+            .into_iter()
+            .filter(|path| path.starts_with(home.path().join(".nvm")))
+            .collect();
+        assert_eq!(nvm, vec![v24.join("devcontainer"), v9.join("devcontainer")]);
+    }
+
+    #[test]
+    fn devcontainer_uses_exact_container_and_workspace_folder() {
+        let container = docker::Container {
+            id: "abc123".to_string(),
+            state: "running".to_string(),
+            local_folder: "/workspace".to_string(),
+            config_file: String::new(),
+            name: "devcontainer".to_string(),
+        };
+        let cmd = devcontainer_for_target(
+            Path::new("/opt/node/bin/devcontainer"),
+            Path::new("/workspace"),
+            &[],
+            &["pwd".to_string()],
+            Some(&container),
+        );
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "exec",
+                "--container-id",
+                "abc123",
+                "--workspace-folder",
+                "/workspace",
+                "pwd"
+            ]
+        );
+        let path = cmd
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .unwrap()
+            .1
+            .unwrap();
+        assert!(path.to_string_lossy().starts_with("/opt/node/bin"));
     }
 
     #[test]
