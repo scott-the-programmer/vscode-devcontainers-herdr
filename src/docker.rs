@@ -1,9 +1,32 @@
 use std::path::Path;
 use std::process::Command;
 
+pub fn normalize_wsl_path(path: &str) -> String {
+    normalize_wsl_path_for_distro(path, std::env::var("WSL_DISTRO_NAME").ok().as_deref())
+}
+
+fn normalize_wsl_path_for_distro(path: &str, current_distro: Option<&str>) -> String {
+    let normalized = path.replace('\\', "/");
+    let rest = ["//wsl.localhost/", "//wsl$/"].iter().find_map(|prefix| {
+        normalized
+            .get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .map(|_| &normalized[prefix.len()..])
+    });
+    if let Some(rest) = rest {
+        if let Some((distro, path)) = rest.split_once('/') {
+            if current_distro.is_some_and(|current| current.eq_ignore_ascii_case(distro)) {
+                return format!("/{path}");
+            }
+        }
+    }
+    normalized
+}
+
 /// One devcontainer-labelled container as reported by `docker ps -a`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Container {
+    pub id: String,
     pub state: String,
     pub local_folder: String,
     pub config_file: String,
@@ -22,8 +45,12 @@ impl Container {
 pub fn best_match<'a>(containers: &'a [Container], root: &Path) -> Option<&'a Container> {
     containers
         .iter()
-        .filter(|c| Path::new(&c.local_folder) == root)
-        .max_by_key(|c| c.is_running())
+        .find(|c| Path::new(&normalize_wsl_path(&c.local_folder)) == root && c.is_running())
+        .or_else(|| {
+            containers
+                .iter()
+                .find(|c| Path::new(&normalize_wsl_path(&c.local_folder)) == root)
+        })
 }
 
 /// `best_match`, with the dogfood fallback: when this binary runs *inside*
@@ -44,7 +71,7 @@ pub fn container_for<'a>(containers: &'a [Container], root: &Path) -> Option<&'a
 
 // Tab-separated on purpose: with `{{json .}}` docker flattens Labels into one
 // comma-joined string that cannot be split safely when values contain commas.
-const FORMAT: &str = "{{.State}}\t{{.Label \"devcontainer.local_folder\"}}\t{{.Label \"devcontainer.config_file\"}}\t{{.Names}}";
+const FORMAT: &str = "{{.ID}}\t{{.State}}\t{{.Label \"devcontainer.local_folder\"}}\t{{.Label \"devcontainer.config_file\"}}\t{{.Names}}";
 
 /// List all devcontainer-labelled containers (any state).
 /// Err = the probe itself failed (docker missing, daemon down) — distinct from Ok(vec![]).
@@ -73,14 +100,16 @@ pub fn parse(output: &str) -> Vec<Container> {
         .lines()
         .filter_map(|line| {
             let mut parts = line.split('\t');
+            let id = parts.next()?.trim();
             let state = parts.next()?.trim();
             let local_folder = parts.next()?.trim();
             let config_file = parts.next()?.trim();
             let name = parts.next().unwrap_or("").trim();
-            if state.is_empty() || local_folder.is_empty() {
+            if id.is_empty() || state.is_empty() || local_folder.is_empty() {
                 return None;
             }
             Some(Container {
+                id: id.to_string(),
                 state: state.to_string(),
                 local_folder: local_folder.to_string(),
                 config_file: config_file.to_string(),
@@ -96,8 +125,8 @@ mod tests {
 
     #[test]
     fn parses_running_and_exited() {
-        let out = "running\t/Users/x/proj\t/Users/x/proj/.devcontainer/devcontainer.json\tvibrant_cat\n\
-                   exited\t/Users/x/other\t/Users/x/other/.devcontainer/devcontainer.json\tsad_dog\n";
+        let out = "aaa\trunning\t/Users/x/proj\t/Users/x/proj/.devcontainer/devcontainer.json\tvibrant_cat\n\
+                   bbb\texited\t/Users/x/other\t/Users/x/other/.devcontainer/devcontainer.json\tsad_dog\n";
         let cs = parse(out);
         assert_eq!(cs.len(), 2);
         assert!(cs[0].is_running());
@@ -107,8 +136,8 @@ mod tests {
 
     #[test]
     fn compose_project_shares_local_folder() {
-        let out = "running\t/Users/x/api\t/Users/x/api/.devcontainer/devcontainer.json\tapi-devcontainer-1\n\
-                   running\t/Users/x/api\t/Users/x/api/.devcontainer/devcontainer.json\tapi-db-1\n";
+        let out = "aaa\trunning\t/Users/x/api\t/Users/x/api/.devcontainer/devcontainer.json\tapi-devcontainer-1\n\
+                   bbb\trunning\t/Users/x/api\t/Users/x/api/.devcontainer/devcontainer.json\tapi-db-1\n";
         let cs = parse(out);
         assert_eq!(cs.len(), 2);
         assert_eq!(cs[0].local_folder, cs[1].local_folder);
@@ -116,8 +145,8 @@ mod tests {
 
     #[test]
     fn skips_blank_and_malformed_lines() {
-        let out = "\nrunning\n\
-                   running\t/Users/x/proj\t\tname-only-no-config\n";
+        let out = "\naaa\trunning\n\
+                   bbb\trunning\t/Users/x/proj\t\tname-only-no-config\n";
         let cs = parse(out);
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].config_file, "");
@@ -131,6 +160,7 @@ mod tests {
 
     fn container(state: &str, folder: &str, name: &str) -> Container {
         Container {
+            id: format!("id-{name}"),
             state: state.into(),
             local_folder: folder.into(),
             config_file: format!("{folder}/.devcontainer/devcontainer.json"),
@@ -146,6 +176,18 @@ mod tests {
         ];
         let m = best_match(&cs, Path::new("/p/api")).unwrap();
         assert_eq!(m.name, "api-devcontainer-1");
+    }
+
+    #[test]
+    fn prefers_first_running_container_in_docker_order() {
+        let cs = vec![
+            container("running", "/p/api", "newest-devcontainer"),
+            container("running", "/p/api", "older-sidecar"),
+        ];
+        assert_eq!(
+            best_match(&cs, Path::new("/p/api")).unwrap().name,
+            "newest-devcontainer"
+        );
     }
 
     #[test]
@@ -185,6 +227,30 @@ mod tests {
         assert_eq!(
             container_for(&cs, Path::new("/p/api")).map(|c| c.name.as_str()),
             Some("api-1")
+        );
+    }
+
+    #[test]
+    fn normalizes_wsl_unc_path_for_current_distro() {
+        assert_eq!(
+            normalize_wsl_path_for_distro(r#"\\WSL.LocalHost\ubuntu\home\me\repo"#, Some("Ubuntu")),
+            "/home/me/repo"
+        );
+    }
+
+    #[test]
+    fn leaves_foreign_wsl_distro_path_unmatched() {
+        assert_eq!(
+            normalize_wsl_path_for_distro(r#"\\wsl.localhost\Debian\home\me\repo"#, Some("Ubuntu")),
+            "//wsl.localhost/Debian/home/me/repo"
+        );
+    }
+
+    #[test]
+    fn leaves_posix_path_unchanged() {
+        assert_eq!(
+            normalize_wsl_path_for_distro("/home/me/repo", Some("Ubuntu")),
+            "/home/me/repo"
         );
     }
 }
